@@ -1,76 +1,8 @@
-# Prerequisites
-*.d
+# Checkpoints
+.ipynb_checkpoints/
 
-# Compiled Object files
-*.slo
-*.lo
-*.o
-*.obj
+# __pycache__ folders
+__pycache__
 
-# Precompiled Headers
-*.gch
-*.pch
-
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
-
-# Executables
-*.exe
-*.out
-*.app
-
-# Output executable
-Test
-S_SOM_Test
-S_Proc_Test
-C_SOM_Test
-C_Proc_Test
-
-# swp files
+# Swap files from vim
 *.swp
-
-# swn files
-*.swn
-
-# swo files
-*.swo
-
-# Octave/Matlab mat files
-*.mat
-
-# txt mat files
-*.txt
-
-# octave.workspace files
-octave-workspace
-
-# wav files
-*.wav
-
-# Festival: SABLE markup files
-*.sable
-
-# cobaltlog error and output files
-*.cobaltlog
-*.error
-*.output
-
-# Doxygen documentation output files
-Doxyfile
-html
-latex
-
-# Python byte code files
-*.pyc
