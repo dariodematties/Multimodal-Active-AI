@@ -12,7 +12,7 @@ global fixation_pos_x
 global fixation_pos_y
 global fixation_angle
 
-path = '/content/drive/My Drive'
+path = '/projects/neurophon'
 os.environ['DALI_EXTRA_PATH']=path
 test_data_root = os.environ['DALI_EXTRA_PATH']
 file_root = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'images', 'val2014')
