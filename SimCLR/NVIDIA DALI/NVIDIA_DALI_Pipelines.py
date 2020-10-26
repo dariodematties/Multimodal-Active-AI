@@ -12,21 +12,41 @@ global fixation_pos_x
 global fixation_pos_y
 global fixation_angle
 
-path = '/projects/neurophon'
-os.environ['DALI_EXTRA_PATH']=path
-test_data_root = os.environ['DALI_EXTRA_PATH']
-file_root = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'images', 'val2014')
-annotations_file = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'annotations', 'instances_val2014.json')
+# path = '/projects/neurophon'
+# os.environ['DALI_EXTRA_PATH']=path
+# test_data_root = os.environ['DALI_EXTRA_PATH']
+# file_root = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'images', 'val2014')
+# annotations_file = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'annotations', 'instances_val2014.json')
 
 
 class COCOReader(Pipeline):
-    def __init__(self, batch_size, num_threads, device_id, num_gpus):
-        super(COCOReader, self).__init__(batch_size, num_threads, device_id, seed = 15, exec_pipelined=False, exec_async=False, prefetch_queue_depth=1)
-        self.input = ops.COCOReader(file_root = file_root, annotations_file = annotations_file,
-                                     shard_id = device_id, num_shards = num_gpus, ratio=True, ltrb=True, random_shuffle=False)
-        self.decode = ops.ImageDecoder(device = "mixed", output_type = types.RGB)
+    def __init__(self, batch_size, num_threads, device_id,
+                 file_root, annotations_file,
+                 shard_id, num_shards, dali_cpu=False):
+
+        super(COCOReader, self).__init__(batch_size,
+                                         num_threads,
+                                         device_id,
+                                         seed=15 + device_id,
+                                         exec_pipelined=False,
+                                         exec_async=False,
+                                         prefetch_queue_depth=1)
+
+        self.input = ops.COCOReader(file_root = file_root,
+                                    annotations_file = annotations_file,
+                                    shard_id = shard_id,
+                                    num_shards = num_shards,
+                                    ratio=True,
+                                    ltrb=True,
+                                    random_shuffle=False)
+
+        #let user decide which pipeline works him bets for RN version he runs
+        dali_device = 'cpu' if dali_cpu else 'gpu'
+        decoder_device = 'cpu' if dali_cpu else 'mixed'
         
-        self.flip   = ops.Flip(device="gpu")
+        self.decode = ops.ImageDecoder(device = decoder_device, output_type = types.RGB)
+        
+        self.flip   = ops.Flip(device=dali_device)
         self.bbflip = ops.BbFlip(device="cpu", ltrb=True)
         
         self.coin = ops.CoinFlip(probability=0.5)
@@ -73,9 +93,20 @@ class FixationCommand(object):
         self.batch_size = batch_size
 
     def _get_vectors(self):
-        self.vector1 = fixation_pos_x
-        self.vector2 = fixation_pos_y
-        self.vector3 = fixation_angle
+        if 'fixation_pos_x' in globals() and 'fixation_pos_y' in globals() and 'fixation_angle' in globals():
+            self.vector1 = fixation_pos_x
+            self.vector2 = fixation_pos_y
+            self.vector3 = fixation_angle
+        else:
+            print('Initialating fixation\n')
+            fixation_pos_x = torch.rand((self.batch_size,1))
+            fixation_pos_y = torch.rand((self.batch_size,1))
+            fixation_angle = (torch.rand((self.batch_size,1))-0.5)*60
+
+            self.vector1 = fixation_pos_x
+            self.vector2 = fixation_pos_y
+            self.vector3 = fixation_angle
+
 
     def __iter__(self):
         self._get_vectors()
@@ -105,22 +136,35 @@ class FixationCommand(object):
 
 
 class FoveatedRetinalProcessor(Pipeline):
-    def __init__(self, batch_size, num_threads, device_id, num_gpus, fixation, images):
-        super(FoveatedRetinalProcessor, self).__init__(batch_size, num_threads, device_id, seed = 15, exec_pipelined=False, exec_async=False, prefetch_queue_depth=1)
-        self.resize_zero = ops.Resize(device = "gpu", resize_x = 640, resize_y = 640)
-        
-        self.rotate = ops.Rotate(device = "gpu")
-        
-        self.resize_one  = ops.Resize(device = "gpu", resize_x = 30, resize_y = 30)
+    def __init__(self, batch_size, num_threads, device_id,
+                 fixation_information, images,
+                 dali_cpu=False):
 
-        self.crop_zero  = ops.Crop(device = "gpu", crop_h = 640, crop_w = 640)
-        self.crop_one   = ops.Crop(device = "gpu", crop_h = 400, crop_w = 400)
-        self.crop_two   = ops.Crop(device = "gpu", crop_h = 240, crop_w = 240)
-        self.crop_three = ops.Crop(device = "gpu", crop_h = 100, crop_w = 100)
-        self.crop_four  = ops.Crop(device = "gpu", crop_h = 30, crop_w = 30)
+        super(FoveatedRetinalProcessor, self).__init__(batch_size,
+                                                       num_threads,
+                                                       device_id,
+                                                       seed=15 + device_id,
+                                                       exec_pipelined=False,
+                                                       exec_async=False,
+                                                       prefetch_queue_depth=1)
+
+        #let user decide which pipeline works him bets for RN version he runs
+        dali_device = 'cpu' if dali_cpu else 'gpu'
+
+        self.resize_zero = ops.Resize(device = dali_device, resize_x = 640, resize_y = 640)
         
-        self.img_batch = ops.ExternalSource(device="gpu", source = images)
-        self.fixation_source = ops.ExternalSource(source = fixation, num_outputs = 3)
+        self.rotate = ops.Rotate(device = dali_device)
+        
+        self.resize_one  = ops.Resize(device = dali_device, resize_x = 30, resize_y = 30)
+
+        self.crop_zero  = ops.Crop(device = dali_device, crop_h = 640, crop_w = 640)
+        self.crop_one   = ops.Crop(device = dali_device, crop_h = 400, crop_w = 400)
+        self.crop_two   = ops.Crop(device = dali_device, crop_h = 240, crop_w = 240)
+        self.crop_three = ops.Crop(device = dali_device, crop_h = 100, crop_w = 100)
+        self.crop_four  = ops.Crop(device = dali_device, crop_h = 30, crop_w = 30)
+        
+        self.img_batch = ops.ExternalSource(device=dali_device, source = images)
+        self.fixation_source = ops.ExternalSource(source = fixation_information, num_outputs = 3)
 
     def define_graph(self):
         images = self.img_batch()

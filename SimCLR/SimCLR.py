@@ -30,6 +30,11 @@ class SimCLR_Module(nn.Module):
 
 
 
+    def train():
+        self.f.train()
+        self.g.train()
+
+
 
     # compute l(i,j) in Algorithm 1
     def _compute_l(self, i, j, s):
