@@ -12,12 +12,6 @@ global fixation_pos_x
 global fixation_pos_y
 global fixation_angle
 
-# path = '/projects/neurophon'
-# os.environ['DALI_EXTRA_PATH']=path
-# test_data_root = os.environ['DALI_EXTRA_PATH']
-# file_root = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'images', 'val2014')
-# annotations_file = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'annotations', 'instances_val2014.json')
-
 
 class COCOReader(Pipeline):
     def __init__(self, batch_size, num_threads, device_id,
@@ -36,6 +30,7 @@ class COCOReader(Pipeline):
                                     annotations_file = annotations_file,
                                     shard_id = shard_id,
                                     num_shards = num_shards,
+                                    pad_last_batch=True,
                                     ratio=True,
                                     ltrb=True,
                                     random_shuffle=False)

@@ -30,6 +30,7 @@ import argparse
 import sys
 import os
 
+import numpy as np
 import torch
 import torch.optim as optim
 
@@ -105,9 +106,12 @@ def main():
         args.world_size = 1
         
         if args.distributed:
-                args.gpu = args.local_rank
+                if torch.cuda.device_count() > 1:
+                        args.gpu = args.local_rank
+
                 torch.cuda.set_device(args.gpu)
-                torch.distributed.init_process_group(backend='nccl', init_method='env://')
+                torch.distributed.init_process_group(backend='gloo', init_method='env://')
+                # torch.distributed.init_process_group(backend='nccl', init_method='env://')
                 args.world_size = torch.distributed.get_world_size()
                 if args.verbose:
                         print('distributed is True, then rank number {} is mapped in device number {}' .format(args.local_rank, args.gpu))
@@ -186,8 +190,11 @@ def main():
         start = time()
         pipe1.build()
         total_time = time() - start
+        meta_data = pipe1.reader_meta()['__COCOReader_1']
         if args.verbose:
                print('pipe1 built by rank number {} in {} seconds' .format(args.local_rank, total_time))
+               print('pipe1 dataset information from rank {} is {}' .format(args.local_rank, meta_data))
+               print('pipe1 shard size for rank {} is {}' .format(args.local_rank, calculate_shard_size(pipe1)))
 
 
         # This is pipe2, which is used to augment the batches brought by pipe1 utilizing foveated saccades
@@ -207,11 +214,15 @@ def main():
         
 
 
-        # # For distributed training, wrap the model with torch.nn.parallel.DistributedDataParallel.
-        # if args.distributed:
-                # model = DDP(model, device_ids=[args.gpu], output_device=args.gpu)
-                # if args.verbose:
-                        # print('Since we are in a distributed setting the model is replicated here in rank {}' .format(args.local_rank))
+        # For distributed training, wrap the model with torch.nn.parallel.DistributedDataParallel.
+        if args.distributed:
+                if args.dali_cpu:
+                        model = DDP(model)
+                else:
+                        model = DDP(model, device_ids=[args.gpu], output_device=args.gpu)
+
+                if args.verbose:
+                        print('Since we are in a distributed setting the model is replicated here in rank {}' .format(args.local_rank))
 
 
 
@@ -248,12 +259,12 @@ def main():
 
 
 # def train(pipe1, pipe2, pytorch_wrapper, model, criterion, optimizer, epoch):
-    # batch_time = AverageMeter()
-    # losses = AverageMeter()
+        # batch_time = AverageMeter()
+        # losses = AverageMeter()
 
-    # # switch to train mode
-    # model.train()
-    # end = time()
+        # # switch to train mode
+        # model.train()
+        # end = time()
 
 
 
@@ -287,6 +298,25 @@ class AverageMeter(object):
 
 
 
+
+
+
+
+
+
+
+
+def calculate_shard_size(pipe):
+        meta_data = pipe.reader_meta()['__COCOReader_1']
+
+        if meta_data['pad_last_batch'] == 1:
+                shards_beg = np.floor(meta_data['shard_id'] * meta_data['epoch_size_padded'] / meta_data['number_of_shards']).astype(np.int)
+                shards_end = np.floor((meta_data['shard_id'] + 1) * meta_data['epoch_size_padded'] / meta_data['number_of_shards']).astype(np.int)
+        else:
+                shards_beg = np.floor(meta_data['shard_id'] * meta_data['epoch_size'] / meta_data['number_of_shards']).astype(np.int)
+                shards_end = np.floor((meta_data['shard_id'] + 1) * meta_data['epoch_size'] / meta_data['number_of_shards']).astype(np.int)
+
+        return shards_end - shards_beg
 
 
 
