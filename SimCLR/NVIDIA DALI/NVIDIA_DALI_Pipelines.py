@@ -8,9 +8,9 @@ from nvidia.dali.plugin.pytorch import feed_ndarray, to_torch_type
 import torch
 from nvidia.dali.backend import TensorGPU, TensorListGPU
 
-global fixation_pos_x
-global fixation_pos_y
-global fixation_angle
+# fixation_pos_x
+# fixation_pos_y
+# fixation_angle
 
 
 class COCOReader(Pipeline):
@@ -88,6 +88,9 @@ class FixationCommand(object):
         self.batch_size = batch_size
 
     def _get_vectors(self):
+        global fixation_pos_x
+        global fixation_pos_y
+        global fixation_angle
         if 'fixation_pos_x' in globals() and 'fixation_pos_y' in globals() and 'fixation_angle' in globals():
             self.vector1 = fixation_pos_x
             self.vector2 = fixation_pos_y

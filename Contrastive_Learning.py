@@ -147,12 +147,6 @@ def main():
                print('SimCLR_Module created from rank {}' .format(args.local_rank))
         
         
-        # # Set optimizer
-        # args.lr = args.lr*float(args.batch_size*args.world_size)/256.
-        # optimizer = optim.SGD(model.parameters(), args.lr,
-                              # momentum=args.momentum,
-                              # weight_decay=args.weight_decay)
-
         # Optionally resume from a checkpoint
         if args.resume:
              # Use a local scope to avoid dangling references
@@ -178,15 +172,26 @@ def main():
         annotations_file = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'annotations', 'instances_val2014.json')
 
         # This is pipe1, using this we bring image batches from MSCOCO dataset
-        pipe1 = NDP.COCOReader(batch_size=args.batch_size,
-                               num_threads=args.workers,
-                               device_id=args.local_rank,
-                               file_root=file_root,
-                               annotations_file=annotations_file,
-                               shard_id=args.local_rank,
-                               num_shards=args.world_size,
-                               dali_cpu=args.dali_cpu)
-
+        # If there is more than one GPU, it will try to map each rank in a different GPU device
+        if torch.cuda.device_count() > 1:
+                pipe1 = NDP.COCOReader(batch_size=args.batch_size,
+                                       num_threads=args.workers,
+                                       device_id=args.local_rank,
+                                       file_root=file_root,
+                                       annotations_file=annotations_file,
+                                       shard_id=args.local_rank,
+                                       num_shards=args.world_size,
+                                       dali_cpu=args.dali_cpu)
+        # Otherwise, it will map all ranks on the same GPU device
+        else:
+                pipe1 = NDP.COCOReader(batch_size=args.batch_size,
+                                       num_threads=args.workers,
+                                       device_id=0,
+                                       file_root=file_root,
+                                       annotations_file=annotations_file,
+                                       shard_id=args.local_rank,
+                                       num_shards=args.world_size,
+                                       dali_cpu=args.dali_cpu)
         start = time()
         pipe1.build()
         total_time = time() - start
@@ -200,18 +205,29 @@ def main():
         # This is pipe2, which is used to augment the batches brought by pipe1 utilizing foveated saccades
         images = NDP.ImageCollector()
         fixation = NDP.FixationCommand(args.batch_size)
-        pipe2 = NDP.FoveatedRetinalProcessor(batch_size=args.batch_size,
-                                             num_threads=args.workers,
-                                             device_id=args.local_rank,
-                                             fixation_information=fixation,
-                                             images=images,
-                                             dali_cpu=args.dali_cpu)
+        # If there is more than one GPU, it will try to map each rank in a different GPU device
+        if torch.cuda.device_count() > 1:
+                pipe2 = NDP.FoveatedRetinalProcessor(batch_size=args.batch_size,
+                                                     num_threads=args.workers,
+                                                     device_id=args.local_rank,
+                                                     fixation_information=fixation,
+                                                     images=images,
+                                                     dali_cpu=args.dali_cpu)
+        # Otherwise, it will map all ranks on the same GPU device
+        else:
+                pipe2 = NDP.FoveatedRetinalProcessor(batch_size=args.batch_size,
+                                                     num_threads=args.workers,
+                                                     device_id=0,
+                                                     fixation_information=fixation,
+                                                     images=images,
+                                                     dali_cpu=args.dali_cpu)
+
+
         start = time()
         pipe2.build()
         total_time = time() - start
         if args.verbose:
                print('pipe2 built by rank number {} in {} seconds' .format(args.local_rank, total_time))
-        
 
 
         # For distributed training, wrap the model with torch.nn.parallel.DistributedDataParallel.
@@ -225,6 +241,23 @@ def main():
                         print('Since we are in a distributed setting the model is replicated here in rank {}' .format(args.local_rank))
 
 
+        # # Set optimizer and scale larning rate on global batch size
+        # args.lr = args.lr*float(args.batch_size*args.world_size)/256.
+        # optimizer = optim.SGD(model.parameters(), args.lr,
+                              # momentum=args.momentum,
+                              # weight_decay=args.weight_decay)
+
+
+        # total_time = AverageMeter()
+        # for epoch in range(args.start_epoch, args.epochs):
+                # # train for one epoch
+                # arguments = {'pipe1': pipe1, 'pipe2': pipe2, 'images': images, 'model': model, 'optimizer': optimizer, 'epoch': epoch}
+                # avg_train_time = train(arguments)
+                # total_time.update(avg_train_time)
+                # if args.test:
+                        # break
+
+                # pipe1.reset()
 
 
 
@@ -258,13 +291,92 @@ def main():
 
 
 
-# def train(pipe1, pipe2, pytorch_wrapper, model, criterion, optimizer, epoch):
-        # batch_time = AverageMeter()
-        # losses = AverageMeter()
 
-        # # switch to train mode
-        # model.train()
-        # end = time()
+def train(arguments):
+        batch_time = AverageMeter()
+        losses = AverageMeter()
+
+        number_of_fixations = 10
+
+        # switch to train mode
+        arguments['model'].train()
+        end = time()
+
+        shard_size = calculate_shard_size(arguments['pipe1'])
+        i = 0
+        while i*arguments['pipe1'].batch_size < shard_size:
+                # bring a new batch
+                pipe1_output = arguments['pipe1'].run()
+                images_gpu = pipe1_output[0]
+                bboxes_cpu = pipe1_output[1]
+                labels_cpu = pipe1_output[2]
+
+                # set images for pipe2
+                arguments['images'].data = images_gpu
+
+                # set fixation parameters for pipe2
+                NDP.fixation_pos_x = torch.rand((args.batch_size,1))
+                NDP.fixation_pos_y = torch.rand((args.batch_size,1))
+                NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*60
+
+                # make the first saccade
+                pipe2_output = NDP.pytorch_wrapper([arguments['pipe2']])
+                outputs1 = arguments['model'](pipe2_output[0][5:])
+
+                for j in range(number_of_fixations):
+                        # set the second round of fixation parameters for pipe2
+                        NDP.fixation_pos_x = torch.rand((args.batch_size,1))
+                        NDP.fixation_pos_y = torch.rand((args.batch_size,1))
+                        NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*60
+                        
+                        # make the second saccade
+                        pipe2_output = NDP.pytorch_wrapper([arguments['pipe2']])
+                        outputs2 = arguments['model'](pipe2_output[0][5:])
+
+                        # Compute Huber loss
+                        loss = arguments['model'].compute_loss(outputs1.detach(), outputs2)
+
+                        # compute gradient and do SGD step
+                        arguments['optimizer'].zero_grad()
+                        loss.backward()
+                        arguments['optimizer'].step()
+                        outputs1=outputs2
+
+
+                if i%args.print_freq == 0:
+                        # Every print_freq iterations, check the loss and speed.
+                        # For best performance, it doesn't make sense to print these metrics every
+                        # iteration, since they incur an allreduce and some host<->device syncs.
+
+                        # Average loss across processes for logging
+                        if args.distributed:
+                                reduced_loss = reduce_tensor(loss.data)
+                        else:
+                                reduced_loss = loss.data
+
+                        # to_python_float incurs a host<->device sync
+                        losses.update(to_python_float(reduced_loss), input.size(0))
+
+                        torch.cuda.synchronize()
+                        batch_time.update((time.time() - end)/args.print_freq)
+                        end = time.time()
+
+                        if args.local_rank == 0:
+                                print('Epoch: [{0}][{1}/{2}]\t'
+                                      'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                                      'Speed {3:.3f} ({4:.3f})\t'
+                                      'Loss {loss.val:.10f} ({loss.avg:.4f})'.format(
+                                      arguments['epoch'], i, train_loader_len,
+                                      args.world_size*args.batch_size/batch_time.val,
+                                      args.world_size*args.batch_size/batch_time.avg,
+                                      batch_time=batch_time,
+                                      loss=losses))
+
+                i += 1
+
+        return batch_time.avg
+
+
 
 
 
@@ -317,6 +429,18 @@ def calculate_shard_size(pipe):
                 shards_end = np.floor((meta_data['shard_id'] + 1) * meta_data['epoch_size'] / meta_data['number_of_shards']).astype(np.int)
 
         return shards_end - shards_beg
+
+
+
+
+
+def reduce_tensor(tensor):
+        rt = tensor.clone()
+        dist.all_reduce(rt, op=dist.reduce_op.SUM)
+        rt /= args.world_size
+        return rt
+
+
 
 
 
