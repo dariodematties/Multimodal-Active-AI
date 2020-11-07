@@ -29,11 +29,13 @@
 import argparse
 import sys
 import os
+import math
 
 import numpy as np
 import torch
 import torch.optim as optim
 
+import torch.distributed as dist
 import torch.distributed.autograd as dist_autograd
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed.optim import DistributedOptimizer
@@ -49,6 +51,8 @@ sys.path.append('SimCLR/MLP')
 import multilayerPerceptron as mlp
 sys.path.append('SimCLR')
 import SimCLR
+import Objective
+import Model_Util
 
 def parse():
         parser = argparse.ArgumentParser(prog='Contrastive_Learning',
@@ -63,8 +67,14 @@ def parse():
                             help='manual epoch number (useful on restarts)')
         parser.add_argument('-b', '--batch-size', default=256, type=int,
                             metavar='N', help='mini-batch size per process (default: 256)')
+        parser.add_argument('-f', '--num-fixations', default=10, type=int,
+                            metavar='F', help='Number of fixations per image (default: 10)')
         parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
-                            metavar='LR', help='Initial learning rate.  Will be scaled by <global batch size>/256: args.lr = args.lr*float(args.batch_size*args.world_size)/256. A warmup schedule will also be applied over the first 5 epochs.')
+                            metavar='LR', help='Initial learning rate.  By default, it will be scaled by <global batch size>/256: args.lr = args.lr*float(args.batch_size*args.world_size)/256. A warmup schedule will also be applied over the first --warmup_epochs epochs.')
+        parser.add_argument('--lrs', '--learning-rate-scaling', default='linear', type=str,
+                            metavar='LRS', help='Function to scale the learning rate value (default: \'linear\').')
+        parser.add_argument('--warmup_epochs', default=10, type=int, metavar='W',
+                            help='Number of warmup epochs (default: 10)')
         parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                             help='momentum')
         parser.add_argument('--temperature', default=0.05, type=float, metavar='T',
@@ -81,6 +91,7 @@ def parse():
                             help='Only run 10 iterations for profiling.')
         parser.add_argument('--deterministic', action='store_true')
         parser.add_argument("--local_rank", default=0, type=int)
+        parser.add_argument("--global_rank", default=0, type=int)
         parser.add_argument('-t', '--test', action='store_true',
                             help='Launch test mode with preset arguments')
         parser.add_argument('-v', '--verbose', action='store_true',
@@ -113,8 +124,10 @@ def main():
                 torch.distributed.init_process_group(backend='gloo', init_method='env://')
                 # torch.distributed.init_process_group(backend='nccl', init_method='env://')
                 args.world_size = torch.distributed.get_world_size()
+                args.global_rank = torch.distributed.get_rank()
                 if args.verbose:
-                        print('distributed is True, then rank number {} is mapped in device number {}' .format(args.local_rank, args.gpu))
+                        print('distributed is True, then world size is {}, global rank is {} and local rank number {} is mapped in device number {}'
+                              .format(args.world_size, args.global_rank, args.local_rank, args.gpu))
 
         args.total_batch_size = args.world_size * args.batch_size
 
@@ -122,29 +135,29 @@ def main():
         # Set the device
         device = torch.device('cpu' if args.dali_cpu else 'cuda:' + str(args.gpu))
         if args.verbose:
-               print('Using device {} in rank number {}' .format(device, args.local_rank))
+               print('Using device {} in global rank number {}, local rank number {}' .format(device, args.global_rank, args.local_rank))
 
 
         # Set fuction_f
         function_f = rn.ResNet.ResNet18()
         function_f.to(device)
         if args.verbose:
-               print('function_f created from rank {}' .format(args.local_rank))
+               print('function_f created from global rank number {}, local rank {}' .format(args.global_rank, args.local_rank))
         
 
         # Set function_g
         function_g = mlp.MLP(512*4*4, 1024, 128)
         function_g.to(device)
         if args.verbose:
-               print('function_g created from rank {}' .format(args.local_rank))
+               print('function_g created from global rank number {}, local rank {}' .format(args.global_rank, args.local_rank))
         
 
         # Set SimCLR model
         img_size = (30,30)
-        model = SimCLR.SimCLR_Module(args.temperature, function_f, function_g, args.batch_size, img_size, device)
+        model = SimCLR.SimCLR_Module(function_f, function_g, args.batch_size, img_size, device)
         model.to(device)
         if args.verbose:
-               print('SimCLR_Module created from rank {}' .format(args.local_rank))
+               print('SimCLR_Module created from global rank number {}, local rank {}' .format(args.global_rank, args.local_rank))
         
         
         # Optionally resume from a checkpoint
@@ -168,8 +181,8 @@ def main():
         path = args.data
         os.environ['DALI_EXTRA_PATH']=path
         test_data_root = os.environ['DALI_EXTRA_PATH']
-        file_root = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'images', 'val2014')
-        annotations_file = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'annotations', 'instances_val2014.json')
+        file_root = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'images', 'train2014')
+        annotations_file = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'annotations', 'instances_train2014.json')
 
         # This is pipe1, using this we bring image batches from MSCOCO dataset
         # If there is more than one GPU, it will try to map each rank in a different GPU device
@@ -197,9 +210,9 @@ def main():
         total_time = time() - start
         meta_data = pipe1.reader_meta()['__COCOReader_1']
         if args.verbose:
-               print('pipe1 built by rank number {} in {} seconds' .format(args.local_rank, total_time))
-               print('pipe1 dataset information from rank {} is {}' .format(args.local_rank, meta_data))
-               print('pipe1 shard size for rank {} is {}' .format(args.local_rank, calculate_shard_size(pipe1)))
+               print('pipe1 built by global rank number {}, local rank number {} in {} seconds' .format(args.global_rank, args.local_rank, total_time))
+               print('pipe1 dataset information from global rank number {}, local rank {} is {}' .format(args.global_rank, args.local_rank, meta_data))
+               print('pipe1 shard size for global rank number {}, local rank {} is {}' .format(args.global_rank, args.local_rank, compute_shard_size(pipe1)))
 
 
         # This is pipe2, which is used to augment the batches brought by pipe1 utilizing foveated saccades
@@ -227,7 +240,7 @@ def main():
         pipe2.build()
         total_time = time() - start
         if args.verbose:
-               print('pipe2 built by rank number {} in {} seconds' .format(args.local_rank, total_time))
+               print('pipe2 built by global rank number {}, local rank number {} in {} seconds' .format(args.global_rank, args.local_rank, total_time))
 
 
         # For distributed training, wrap the model with torch.nn.parallel.DistributedDataParallel.
@@ -238,26 +251,41 @@ def main():
                         model = DDP(model, device_ids=[args.gpu], output_device=args.gpu)
 
                 if args.verbose:
-                        print('Since we are in a distributed setting the model is replicated here in rank {}' .format(args.local_rank))
+                        print('Since we are in a distributed setting the model is replicated here in global rank number {}, local rank {}' .format(args.global_rank, args.local_rank))
 
 
-        # # Set optimizer and scale larning rate on global batch size
+        # Set optimizer and scale larning rate on global batch size
         # args.lr = args.lr*float(args.batch_size*args.world_size)/256.
         # optimizer = optim.SGD(model.parameters(), args.lr,
                               # momentum=args.momentum,
                               # weight_decay=args.weight_decay)
 
+        optimizer = optim.Adam(model.parameters(), args.lr)
 
-        # total_time = AverageMeter()
-        # for epoch in range(args.start_epoch, args.epochs):
-                # # train for one epoch
-                # arguments = {'pipe1': pipe1, 'pipe2': pipe2, 'images': images, 'model': model, 'optimizer': optimizer, 'epoch': epoch}
-                # avg_train_time = train(arguments)
-                # total_time.update(avg_train_time)
-                # if args.test:
-                        # break
+        total_time = AverageMeter()
+        for epoch in range(args.start_epoch, args.epochs):
+                # train for one epoch
+                arguments = {'pipe1': pipe1,
+                             'pipe2': pipe2,
+                             'images': images,
+                             'model': model,
+                             'optimizer': optimizer,
+                             'warmup_epochs': args.warmup_epochs,
+                             'train_epochs': args.epochs,
+                             'num_examples': compute_shard_size(pipe1),
+                             'epoch': epoch,
+                             'batch_size': args.batch_size,
+                             'world_size': args.world_size,
+                             'base_learning_rate': args.lr,
+                             'learning_rate_scaling': args.lrs,
+                             'temperature': args.temperature,
+                             'device': device}
+                avg_train_time = train(arguments)
+                total_time.update(avg_train_time)
+                if args.test:
+                        break
 
-                # pipe1.reset()
+                pipe1.reset()
 
 
 
@@ -296,20 +324,21 @@ def train(arguments):
         batch_time = AverageMeter()
         losses = AverageMeter()
 
-        number_of_fixations = 10
-
         # switch to train mode
         arguments['model'].train()
         end = time()
 
-        shard_size = calculate_shard_size(arguments['pipe1'])
+        shard_size = compute_shard_size(arguments['pipe1'])
         i = 0
         while i*arguments['pipe1'].batch_size < shard_size:
                 # bring a new batch
                 pipe1_output = arguments['pipe1'].run()
                 images_gpu = pipe1_output[0]
+
                 bboxes_cpu = pipe1_output[1]
                 labels_cpu = pipe1_output[2]
+
+                train_loader_len = int(math.ceil(shard_size / arguments['pipe1'].batch_size))
 
                 # set images for pipe2
                 arguments['images'].data = images_gpu
@@ -323,7 +352,7 @@ def train(arguments):
                 pipe2_output = NDP.pytorch_wrapper([arguments['pipe2']])
                 outputs1 = arguments['model'](pipe2_output[0][5:])
 
-                for j in range(number_of_fixations):
+                for j in range(args.num_fixations):
                         # set the second round of fixation parameters for pipe2
                         NDP.fixation_pos_x = torch.rand((args.batch_size,1))
                         NDP.fixation_pos_y = torch.rand((args.batch_size,1))
@@ -334,7 +363,17 @@ def train(arguments):
                         outputs2 = arguments['model'](pipe2_output[0][5:])
 
                         # Compute Huber loss
-                        loss = arguments['model'].compute_loss(outputs1.detach(), outputs2)
+                        # loss = SimCLR.compute_loss(outputs1.data, outputs2, arguments['temperature'])
+                        loss, logits, labels = Objective.contrastive_loss(hidden1=outputs1.data,
+                                                                          hidden2=outputs2,
+                                                                          temperature=arguments['temperature'],
+                                                                          local_rank=args.local_rank,
+                                                                          world_size=args.world_size,
+                                                                          device=arguments['device'])
+
+
+                        # Adjust learning rate
+                        Model_Util.learning_rate_schedule(arguments)
 
                         # compute gradient and do SGD step
                         arguments['optimizer'].zero_grad()
@@ -355,11 +394,11 @@ def train(arguments):
                                 reduced_loss = loss.data
 
                         # to_python_float incurs a host<->device sync
-                        losses.update(to_python_float(reduced_loss), input.size(0))
+                        losses.update(to_python_float(reduced_loss), pipe2_output[0][5].size(0))
 
                         torch.cuda.synchronize()
-                        batch_time.update((time.time() - end)/args.print_freq)
-                        end = time.time()
+                        batch_time.update((time() - end)/args.print_freq)
+                        end = time()
 
                         if args.local_rank == 0:
                                 print('Epoch: [{0}][{1}/{2}]\t'
@@ -418,7 +457,7 @@ class AverageMeter(object):
 
 
 
-def calculate_shard_size(pipe):
+def compute_shard_size(pipe):
         meta_data = pipe.reader_meta()['__COCOReader_1']
 
         if meta_data['pad_last_batch'] == 1:
@@ -441,7 +480,12 @@ def reduce_tensor(tensor):
         return rt
 
 
-
+# item() is a recent addition, so this helps with backward compatibility.
+def to_python_float(t):
+        if hasattr(t, 'item'):
+                return t.item()
+        else:
+                return t[0]
 
 
 if __name__ == '__main__':
