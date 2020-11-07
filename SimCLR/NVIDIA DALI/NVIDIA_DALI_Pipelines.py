@@ -8,9 +8,9 @@ from nvidia.dali.plugin.pytorch import feed_ndarray, to_torch_type
 import torch
 from nvidia.dali.backend import TensorGPU, TensorListGPU
 
-# fixation_pos_x
-# fixation_pos_y
-# fixation_angle
+global fixation_pos_x
+global fixation_pos_y
+global fixation_angle
 
 
 class COCOReader(Pipeline):
