@@ -1,5 +1,6 @@
 # Checkpoints
 .ipynb_checkpoints/*
+*.pth.tar
 
 # __pycache__ folders
 __pycache__
