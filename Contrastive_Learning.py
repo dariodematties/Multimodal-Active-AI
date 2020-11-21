@@ -87,6 +87,8 @@ def parse():
                             help='path to latest checkpoint (default: none)')
         parser.add_argument('--optimizer', default='adam', type=str, metavar='OPTIM',
                             help='optimizer for training the network (default: adam)')
+        parser.add_argument('--dataset', default='mscoco', type=str, metavar='DATASET',
+                            help='the dataset we will use (default: mscoco)')
         parser.add_argument('--dali_cpu', action='store_true',
                             help='Runs CPU based version of DALI pipeline.')
         parser.add_argument('--prof', default=-1, type=int,
@@ -120,10 +122,10 @@ def main():
         args.world_size = 1
         
         if args.distributed:
-                if torch.cuda.device_count() > 1:
-                        args.gpu = args.local_rank
+                args.gpu = args.local_rank
 
                 torch.cuda.set_device(args.gpu)
+                # torch.distributed.init_process_group(backend='mpi', init_method='env://')
                 torch.distributed.init_process_group(backend='gloo', init_method='env://')
                 # torch.distributed.init_process_group(backend='nccl', init_method='env://')
                 args.world_size = torch.distributed.get_world_size()
@@ -166,12 +168,11 @@ def main():
         path = args.data
         os.environ['DALI_EXTRA_PATH']=path
         test_data_root = os.environ['DALI_EXTRA_PATH']
-        file_root = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'images', 'train2014')
-        annotations_file = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'annotations', 'instances_train2014.json')
-
         # This is pipe1, using this we bring image batches from MSCOCO dataset for training
-        # If there is more than one GPU, it will try to map each rank in a different GPU device
-        if torch.cuda.device_count() > 1:
+        if args.dataset == 'mscoco':
+                file_root = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'images', 'train2014')
+                annotations_file = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'annotations', 'instances_train2014.json')
+
                 pipe1 = NDP.COCOReader(batch_size=args.batch_size,
                                        num_threads=args.workers,
                                        device_id=args.local_rank,
@@ -180,20 +181,28 @@ def main():
                                        shard_id=args.local_rank,
                                        num_shards=args.world_size,
                                        dali_cpu=args.dali_cpu)
-        # Otherwise, it will map all ranks on the same GPU device
+
+                pipe1_reader_name = '__COCOReader_1'
+
+        elif args.dataset == 'imagenet':
+                file_root = os.path.join(test_data_root, 'ImageNet', 'ILSVRC', 'Data', 'CLS-LOC', 'train')
+
+                pipe1 = NDP.ImagenetReader(batch_size=args.batch_size,
+                                           num_threads=args.workers,
+                                           device_id=args.local_rank,
+                                           file_root=file_root,
+                                           shard_id=args.local_rank,
+                                           num_shards=args.world_size,
+                                           dali_cpu=args.dali_cpu)
+
+                pipe1_reader_name = '__FileReader_1'
+
         else:
-                pipe1 = NDP.COCOReader(batch_size=args.batch_size,
-                                       num_threads=args.workers,
-                                       device_id=0,
-                                       file_root=file_root,
-                                       annotations_file=annotations_file,
-                                       shard_id=args.local_rank,
-                                       num_shards=args.world_size,
-                                       dali_cpu=args.dali_cpu)
+                raise Exception("error: I do not accept {} as a viable dataset".format(args.dataset))
+
         start = time()
         pipe1.build()
         total_time = time() - start
-        pipe1_reader_name = '__COCOReader_1'
         meta_data = pipe1.reader_meta()[pipe1_reader_name]
         if args.verbose:
                print('pipe1 built by global rank number {}, local rank number {} in {} seconds' .format(args.global_rank, args.local_rank, total_time))
@@ -207,22 +216,12 @@ def main():
         # This is pipe2, which is used to augment the batches brought by pipe1 utilizing foveated saccades
         images = NDP.ImageCollector()
         fixation = NDP.FixationCommand(args.batch_size)
-        # If there is more than one GPU, it will try to map each rank in a different GPU device
-        if torch.cuda.device_count() > 1:
-                pipe2 = NDP.FoveatedRetinalProcessor(batch_size=args.batch_size,
-                                                     num_threads=args.workers,
-                                                     device_id=args.local_rank,
-                                                     fixation_information=fixation,
-                                                     images=images,
-                                                     dali_cpu=args.dali_cpu)
-        # Otherwise, it will map all ranks on the same GPU device
-        else:
-                pipe2 = NDP.FoveatedRetinalProcessor(batch_size=args.batch_size,
-                                                     num_threads=args.workers,
-                                                     device_id=0,
-                                                     fixation_information=fixation,
-                                                     images=images,
-                                                     dali_cpu=args.dali_cpu)
+        pipe2 = NDP.FoveatedRetinalProcessor(batch_size=args.batch_size,
+                                             num_threads=args.workers,
+                                             device_id=args.local_rank,
+                                             fixation_information=fixation,
+                                             images=images,
+                                             dali_cpu=args.dali_cpu)
 
 
         start = time()
@@ -242,12 +241,11 @@ def main():
         path = args.data
         os.environ['DALI_EXTRA_PATH']=path
         test_data_root = os.environ['DALI_EXTRA_PATH']
-        file_root = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'images', 'val2014')
-        annotations_file = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'annotations', 'instances_val2014.json')
-
         # This is pipe3, using this we bring image batches from MSCOCO dataset for validation
-        # If there is more than one GPU, it will try to map each rank in a different GPU device
-        if torch.cuda.device_count() > 1:
+        if args.dataset == 'mscoco':
+                file_root = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'images', 'val2014')
+                annotations_file = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'annotations', 'instances_val2014.json')
+
                 pipe3 = NDP.COCOReader(batch_size=args.batch_size,
                                        num_threads=args.workers,
                                        device_id=args.local_rank,
@@ -256,20 +254,28 @@ def main():
                                        shard_id=args.local_rank,
                                        num_shards=args.world_size,
                                        dali_cpu=args.dali_cpu)
-        # Otherwise, it will map all ranks on the same GPU device
+
+                pipe3_reader_name = '__COCOReader_22'
+
+        elif args.dataset == 'imagenet':
+                file_root = os.path.join(test_data_root, 'ImageNet', 'ILSVRC', 'Data', 'CLS-LOC', 'val')
+
+                pipe3 = NDP.ImagenetReader(batch_size=args.batch_size,
+                                           num_threads=args.workers,
+                                           device_id=args.local_rank,
+                                           file_root=file_root,
+                                           shard_id=args.local_rank,
+                                           num_shards=args.world_size,
+                                           dali_cpu=args.dali_cpu)
+
+                pipe3_reader_name = '__FileReader_21'
+
         else:
-                pipe3 = NDP.COCOReader(batch_size=args.batch_size,
-                                       num_threads=args.workers,
-                                       device_id=0,
-                                       file_root=file_root,
-                                       annotations_file=annotations_file,
-                                       shard_id=args.local_rank,
-                                       num_shards=args.world_size,
-                                       dali_cpu=args.dali_cpu)
+                raise Exception("error: I do not accept {} as a viable dataset".format(args.dataset))
+
         start = time()
         pipe3.build()
         total_time = time() - start
-        pipe3_reader_name = '__COCOReader_22'
         meta_data = pipe3.reader_meta()[pipe3_reader_name]
         if args.verbose:
                print('pipe3 built by global rank number {}, local rank number {} in {} seconds' .format(args.global_rank, args.local_rank, total_time))
@@ -423,8 +429,8 @@ def train(arguments):
                 pipe1_output = arguments['pipe1'].run()
                 images_gpu = pipe1_output[0]
 
-                bboxes_cpu = pipe1_output[1]
-                labels_cpu = pipe1_output[2]
+                # bboxes_cpu = pipe1_output[1]
+                # labels_cpu = pipe1_output[2]
 
                 train_loader_len = int(math.ceil(shard_size / arguments['pipe1'].batch_size))
 
@@ -534,8 +540,8 @@ def validate(arguments):
                 pipe3_output = arguments['pipe3'].run()
                 images_gpu = pipe3_output[0]
 
-                bboxes_cpu = pipe3_output[1]
-                labels_cpu = pipe3_output[2]
+                # bboxes_cpu = pipe3_output[1]
+                # labels_cpu = pipe3_output[2]
 
                 val_loader_len = int(math.ceil(shard_size / arguments['pipe3'].batch_size))
 

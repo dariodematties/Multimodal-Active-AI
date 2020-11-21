@@ -216,3 +216,51 @@ def pytorch_wrapper(pipes):
             outs[-1].append(t)
         p.release_outputs()
     return outs
+
+
+
+
+
+
+
+
+class ImagenetReader(Pipeline):
+    def __init__(self, batch_size, num_threads, device_id,
+                 file_root,
+                 shard_id, num_shards, dali_cpu=False):
+
+        super(ImagenetReader, self).__init__(batch_size,
+                                         num_threads,
+                                         device_id,
+                                         seed=15 + device_id,
+                                         exec_pipelined=False,
+                                         exec_async=False,
+                                         prefetch_queue_depth=1)
+
+        self.input = ops.FileReader(file_root = file_root,
+                                    shard_id = shard_id,
+                                    num_shards = num_shards,
+                                    pad_last_batch=True,
+                                    random_shuffle=False)
+
+        #let user decide which pipeline works him bets for RN version he runs
+        dali_device = 'cpu' if dali_cpu else 'gpu'
+        decoder_device = 'cpu' if dali_cpu else 'mixed'
+        
+        self.decode = ops.ImageDecoder(device = decoder_device, output_type = types.RGB)
+        
+        self.flip   = ops.Flip(device=dali_device)
+        self.bbflip = ops.BbFlip(device="cpu", ltrb=True)
+        
+        self.coin = ops.CoinFlip(probability=0.5)
+
+
+    def define_graph(self):
+        rng = self.coin()
+        inputs, labels = self.input()
+        images = self.decode(inputs)
+        
+        images = self.flip(images, horizontal=rng)
+        
+        return (images, labels)
+
