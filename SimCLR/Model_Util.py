@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import shutil
 import math
 import torch.optim as optim
@@ -106,3 +107,17 @@ def top_k_accuracy(preds, target, k):
         c=a==b
         d=torch.any(c,dim=0)
         return torch.sum(d)/(d.shape[0] + 0.0)
+
+
+
+
+
+
+
+
+class Identity(nn.Module):
+        def __init__(self):
+                super().__init__()
+
+        def forward(self, x):
+                return x
