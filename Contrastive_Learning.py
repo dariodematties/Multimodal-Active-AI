@@ -31,6 +31,7 @@ import sys
 import os
 import math
 
+import random
 import numpy as np
 import torch
 
@@ -53,12 +54,18 @@ sys.path.append('SimCLR')
 import SimCLR
 import Objective
 import Model_Util
+import Utilities
 
 def parse():
+
+        datasets = ['mscoco', 'imagenet']
+
+        optimizers = ['sgd', 'adam', 'lars']
+
         parser = argparse.ArgumentParser(prog='Contrastive_Learning',
                                          description='This program executes the Contrastive Learning Algorithm using foveated saccades')
-        parser.add_argument('data', metavar='DIR', default='/projects/neurophon', type=str,
-                            help='path to the MSCOCO dataset')
+        parser.add_argument('data', metavar='DIR', type=str,
+                            help='path to MSCOCO or IMAGENET dataset')
         parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                             help='number of data loading workers (default: 4)')
         parser.add_argument('--epochs', default=90, type=int, metavar='N',
@@ -86,14 +93,21 @@ def parse():
         parser.add_argument('--resume', default='', type=str, metavar='PATH',
                             help='path to latest checkpoint (default: none)')
         parser.add_argument('--optimizer', default='adam', type=str, metavar='OPTIM',
-                            help='optimizer for training the network (default: adam)')
+                            choices=optimizers,
+                            help='optimizer for training the network\n' +
+                                 'Choices are: ' +
+                                 ' | '.join(optimizers) +
+                                 ' (default: adam)')
         parser.add_argument('--dataset', default='mscoco', type=str, metavar='DATASET',
-                            help='the dataset we will use (default: mscoco)')
+                            choices=datasets,
+                            help='the dataset we will use\n' +
+                                 'Choices are: ' +
+                                 ' | '.join(datasets) +
+                                 ' (default: mscoco)')
+        parser.add_argument('--color-augmentation', default=0.5, type=float,
+                            metavar='COLOR_AUG_PROBABILITY', help='The probability of applying color augmentation to the images (default: 0.5).')
         parser.add_argument('--dali_cpu', action='store_true',
                             help='Runs CPU based version of DALI pipeline.')
-        parser.add_argument('--prof', default=-1, type=int,
-                            help='Only run 10 iterations for profiling.')
-        parser.add_argument('--deterministic', action='store_true')
         parser.add_argument("--local_rank", default=0, type=int)
         parser.add_argument("--global_rank", default=0, type=int)
         parser.add_argument('-t', '--test', action='store_true',
@@ -134,6 +148,7 @@ def main():
                         print('distributed is True, then world size is {}, global rank is {} and local rank number {} is mapped in device number {}'
                               .format(args.world_size, args.global_rank, args.local_rank, args.gpu))
 
+
         args.total_batch_size = args.world_size * args.batch_size
 
 
@@ -144,15 +159,15 @@ def main():
 
 
         # Set fuction_f
-        function_f = rn.ResNet.ResNet18()
-        function_f.to(device)
+        function_f = rn.ResNet.ResNet50()
+        function_f = function_f.to(device)
         if args.verbose:
                print('function_f created from global rank number {}, local rank {}' .format(args.global_rank, args.local_rank))
         
 
         # Set function_g
         function_g = mlp.MLP(512*4*4, 1024, 128)
-        function_g.to(device)
+        function_g = function_g.to(device)
         if args.verbose:
                print('function_g created from global rank number {}, local rank {}' .format(args.global_rank, args.local_rank))
         
@@ -160,7 +175,7 @@ def main():
         # Set SimCLR model
         img_size = (30,30)
         model = SimCLR.SimCLR_Module(function_f, function_g, args.batch_size, img_size, device)
-        model.to(device)
+        model = model.to(device)
         if args.verbose:
                print('SimCLR_Module created from global rank number {}, local rank {}' .format(args.global_rank, args.local_rank))
         
@@ -168,7 +183,7 @@ def main():
         path = args.data
         os.environ['DALI_EXTRA_PATH']=path
         test_data_root = os.environ['DALI_EXTRA_PATH']
-        # This is pipe1, using this we bring image batches from MSCOCO dataset for training
+        # This is pipe1, using this we bring image batches for training
         if args.dataset == 'mscoco':
                 file_root = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'images', 'train2014')
                 annotations_file = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'annotations', 'instances_train2014.json')
@@ -182,7 +197,7 @@ def main():
                                        num_shards=args.world_size,
                                        dali_cpu=args.dali_cpu)
 
-                pipe1_reader_name = '__COCOReader_1'
+                pipe1_reader_name = 'COCOReader'
 
         elif args.dataset == 'imagenet':
                 file_root = os.path.join(test_data_root, 'ImageNet', 'ILSVRC', 'Data', 'CLS-LOC', 'train')
@@ -195,7 +210,7 @@ def main():
                                            num_shards=args.world_size,
                                            dali_cpu=args.dali_cpu)
 
-                pipe1_reader_name = '__FileReader_1'
+                pipe1_reader_name = 'ImagesReader'
 
         else:
                 raise Exception("error: I do not accept {} as a viable dataset".format(args.dataset))
@@ -207,21 +222,23 @@ def main():
         if args.verbose:
                print('pipe1 built by global rank number {}, local rank number {} in {} seconds' .format(args.global_rank, args.local_rank, total_time))
                print('pipe1 dataset information from global rank number {}, local rank {} is {}' .format(args.global_rank, args.local_rank, meta_data))
-               print('pipe1 shard size for global rank number {}, local rank {} is {}' .format(args.global_rank, args.local_rank, compute_shard_size(pipe1, pipe1_reader_name)))
+               print('pipe1 shard size for global rank number {}, local rank {} is {}' .format(args.global_rank, args.local_rank, NDP.compute_shard_size(pipe1, pipe1_reader_name)))
 
 
 
 
 
-        # This is pipe2, which is used to augment the batches brought by pipe1 utilizing foveated saccades
+        # This is pipe2, which is used to augment the batches brought by pipe1 or pipe3 utilizing foveated saccades
         images = NDP.ImageCollector()
         fixation = NDP.FixationCommand(args.batch_size)
-        pipe2 = NDP.FoveatedRetinalProcessor(batch_size=args.batch_size,
-                                             num_threads=args.workers,
-                                             device_id=args.local_rank,
-                                             fixation_information=fixation,
-                                             images=images,
-                                             dali_cpu=args.dali_cpu)
+        color = NDP.ColorCommand(args.batch_size)
+        pipe2 = NDP.UnlabeledFoveatedRetinalProcessor(batch_size=args.batch_size,
+                                                      num_threads=args.workers,
+                                                      device_id=args.local_rank,
+                                                      fixation_information=fixation,
+                                                      color_information=color,
+                                                      images=images,
+                                                      dali_cpu=args.dali_cpu)
 
 
         start = time()
@@ -241,7 +258,7 @@ def main():
         path = args.data
         os.environ['DALI_EXTRA_PATH']=path
         test_data_root = os.environ['DALI_EXTRA_PATH']
-        # This is pipe3, using this we bring image batches from MSCOCO dataset for validation
+        # This is pipe3, using this we bring image batches for validation
         if args.dataset == 'mscoco':
                 file_root = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'images', 'val2014')
                 annotations_file = os.path.join(test_data_root, 'MSCOCO', 'cocoapi', 'annotations', 'instances_val2014.json')
@@ -255,7 +272,7 @@ def main():
                                        num_shards=args.world_size,
                                        dali_cpu=args.dali_cpu)
 
-                pipe3_reader_name = '__COCOReader_22'
+                pipe3_reader_name = 'COCOReader'
 
         elif args.dataset == 'imagenet':
                 file_root = os.path.join(test_data_root, 'ImageNet', 'ILSVRC', 'Data', 'CLS-LOC', 'val')
@@ -268,7 +285,7 @@ def main():
                                            num_shards=args.world_size,
                                            dali_cpu=args.dali_cpu)
 
-                pipe3_reader_name = '__FileReader_21'
+                pipe3_reader_name = 'ImagesReader'
 
         else:
                 raise Exception("error: I do not accept {} as a viable dataset".format(args.dataset))
@@ -280,7 +297,7 @@ def main():
         if args.verbose:
                print('pipe3 built by global rank number {}, local rank number {} in {} seconds' .format(args.global_rank, args.local_rank, total_time))
                print('pipe3 dataset information from global rank number {}, local rank {} is {}' .format(args.global_rank, args.local_rank, meta_data))
-               print('pipe3 shard size for global rank number {}, local rank {} is {}' .format(args.global_rank, args.local_rank, compute_shard_size(pipe3, pipe3_reader_name)))
+               print('pipe3 shard size for global rank number {}, local rank {} is {}' .format(args.global_rank, args.local_rank, NDP.compute_shard_size(pipe3, pipe3_reader_name)))
 
 
 
@@ -296,7 +313,8 @@ def main():
                         model = DDP(model, device_ids=[args.gpu], output_device=args.gpu)
 
                 if args.verbose:
-                        print('Since we are in a distributed setting the model is replicated here in global rank number {}, local rank {}' .format(args.global_rank, args.local_rank))
+                        print('Since we are in a distributed setting the model is replicated here in global rank number {}, local rank {}'
+                                        .format(args.global_rank, args.local_rank))
 
 
         # Set optimizer
@@ -325,7 +343,7 @@ def main():
              args.start_epoch, best_prec1, model, optimizer = resume()
 
 
-        total_time = AverageMeter()
+        total_time = Utilities.AverageMeter()
         for epoch in range(args.start_epoch, args.epochs):
                 arguments = {'pipe1': pipe1,
                              'pipe2': pipe2,
@@ -335,7 +353,7 @@ def main():
                              'optimizer': optimizer,
                              'warmup_epochs': args.warmup_epochs,
                              'train_epochs': args.epochs,
-                             'num_examples': compute_shard_size(pipe1, pipe1_reader_name),
+                             'num_examples': NDP.compute_shard_size(pipe1, pipe1_reader_name),
                              'pipe1_reader_name': pipe1_reader_name,
                              'pipe3_reader_name': pipe3_reader_name,
                              'epoch': epoch,
@@ -415,14 +433,14 @@ def main():
 
 
 def train(arguments):
-        batch_time = AverageMeter()
-        losses = AverageMeter()
+        batch_time = Utilities.AverageMeter()
+        losses = Utilities.AverageMeter()
 
         # switch to train mode
         arguments['model'].train()
         end = time()
 
-        shard_size = compute_shard_size(arguments['pipe1'], arguments['pipe1_reader_name'])
+        shard_size = NDP.compute_shard_size(arguments['pipe1'], arguments['pipe1_reader_name'])
         i = 0
         while i*arguments['pipe1'].batch_size < shard_size:
                 # bring a new batch
@@ -440,21 +458,45 @@ def train(arguments):
                 # set fixation parameters for pipe2
                 NDP.fixation_pos_x = torch.rand((args.batch_size,1))
                 NDP.fixation_pos_y = torch.rand((args.batch_size,1))
-                NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*60
+                NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*260
+
+                # set color parameters for pipe2
+                if random.uniform(0, 1) < args.color_augmentation:
+                        NDP.brightness = torch.rand((args.batch_size,1))*2
+                        NDP.contrast = torch.rand((args.batch_size,1))*2
+                        NDP.hue = torch.rand((args.batch_size,1))*360
+                        NDP.saturation = torch.rand((args.batch_size,1))
+                else:
+                        NDP.brightness = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).view(-1,1)
+                        NDP.contrast = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).view(-1,1)
+                        NDP.hue = torch.repeat_interleave(torch.Tensor([0.0]), args.batch_size).view(-1,1)
+                        NDP.saturation = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).view(-1,1)
 
                 # make the first saccade
                 pipe2_output = NDP.pytorch_wrapper([arguments['pipe2']])
-                outputs1 = arguments['model'](pipe2_output[0][5:])
+                outputs1 = arguments['model'](pipe2_output[0])
 
                 for j in range(args.num_fixations):
                         # set the second round of fixation parameters for pipe2
                         NDP.fixation_pos_x = torch.rand((args.batch_size,1))
                         NDP.fixation_pos_y = torch.rand((args.batch_size,1))
-                        NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*60
+                        NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*260
                         
+                        # set color parameters for pipe2
+                        if random.uniform(0, 1) < args.color_augmentation:
+                                NDP.brightness = torch.rand((args.batch_size,1))*2
+                                NDP.contrast = torch.rand((args.batch_size,1))*2
+                                NDP.hue = torch.rand((args.batch_size,1))*360
+                                NDP.saturation = torch.rand((args.batch_size,1))
+                        else:
+                                NDP.brightness = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).view(-1,1)
+                                NDP.contrast = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).view(-1,1)
+                                NDP.hue = torch.repeat_interleave(torch.Tensor([0.0]), args.batch_size).view(-1,1)
+                                NDP.saturation = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).view(-1,1)
+
                         # make the second saccade
                         pipe2_output = NDP.pytorch_wrapper([arguments['pipe2']])
-                        outputs2 = arguments['model'](pipe2_output[0][5:])
+                        outputs2 = arguments['model'](pipe2_output[0])
 
                         # Compute Huber loss
                         loss, logits, labels = Objective.contrastive_loss(hidden1=outputs1.data,
@@ -486,12 +528,12 @@ def train(arguments):
 
                         # Average loss across processes for logging
                         if args.distributed:
-                                reduced_loss = reduce_tensor(loss.data)
+                                reduced_loss = Utilities.reduce_tensor(loss.data, args.world_size)
                         else:
                                 reduced_loss = loss.data
 
                         # to_python_float incurs a host<->device sync
-                        losses.update(to_python_float(reduced_loss), pipe2_output[0][5].size(0))
+                        losses.update(Utilities.to_python_float(reduced_loss), pipe2_output[0][0].size(0))
 
                         torch.cuda.synchronize()
                         batch_time.update((time() - end)/args.print_freq)
@@ -522,9 +564,9 @@ def train(arguments):
 
 
 def validate(arguments):
-        batch_time = AverageMeter()
-        top1_prec = AverageMeter()
-        top5_prec = AverageMeter()
+        batch_time = Utilities.AverageMeter()
+        top1_prec = Utilities.AverageMeter()
+        top5_prec = Utilities.AverageMeter()
 
         # switch to evaluate mode
         arguments['model'].eval()
@@ -533,7 +575,7 @@ def validate(arguments):
 
         accuracy = Accuracy()
 
-        shard_size = compute_shard_size(arguments['pipe3'], arguments['pipe3_reader_name'])
+        shard_size = NDP.compute_shard_size(arguments['pipe3'], arguments['pipe3_reader_name'])
         i = 0
         while i*arguments['pipe3'].batch_size < shard_size:
                 # bring a new batch
@@ -554,18 +596,42 @@ def validate(arguments):
                         NDP.fixation_pos_y = torch.rand((args.batch_size,1))
                         NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*60
 
+                        # set color parameters for pipe2
+                        if random.uniform(0, 1) < args.color_augmentation:
+                                NDP.brightness = torch.rand((args.batch_size,1))*2
+                                NDP.contrast = torch.rand((args.batch_size,1))*2
+                                NDP.hue = torch.rand((args.batch_size,1))*360
+                                NDP.saturation = torch.rand((args.batch_size,1))
+                        else:
+                                NDP.brightness = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).view(-1,1)
+                                NDP.contrast = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).view(-1,1)
+                                NDP.hue = torch.repeat_interleave(torch.Tensor([0.0]), args.batch_size).view(-1,1)
+                                NDP.saturation = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).view(-1,1)
+
                         # make the first saccade
                         pipe2_output = NDP.pytorch_wrapper([arguments['pipe2']])
-                        outputs1 = arguments['model'](pipe2_output[0][5:])
+                        outputs1 = arguments['model'](pipe2_output[0])
 
                         # set the second round of fixation parameters for pipe2
                         NDP.fixation_pos_x = torch.rand((args.batch_size,1))
                         NDP.fixation_pos_y = torch.rand((args.batch_size,1))
                         NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*60
                         
+                        # set the second round of color parameters for pipe2
+                        if random.uniform(0, 1) < args.color_augmentation:
+                                NDP.brightness = torch.rand((args.batch_size,1))*2
+                                NDP.contrast = torch.rand((args.batch_size,1))*2
+                                NDP.hue = torch.rand((args.batch_size,1))*360
+                                NDP.saturation = torch.rand((args.batch_size,1))
+                        else:
+                                NDP.brightness = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).view(-1,1)
+                                NDP.contrast = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).view(-1,1)
+                                NDP.hue = torch.repeat_interleave(torch.Tensor([0.0]), args.batch_size).view(-1,1)
+                                NDP.saturation = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).view(-1,1)
+
                         # make the second saccade
                         pipe2_output = NDP.pytorch_wrapper([arguments['pipe2']])
-                        outputs2 = arguments['model'](pipe2_output[0][5:])
+                        outputs2 = arguments['model'](pipe2_output[0])
 
                         # Compute Huber loss
                         loss, logits, labels = Objective.contrastive_loss(hidden1=outputs1.data,
@@ -581,15 +647,15 @@ def validate(arguments):
 
 
                 if args.distributed:
-                        reduced_top1 = reduce_tensor(contrastive_top_1_accuracy.data)
-                        reduced_top5 = reduce_tensor(contrastive_top_5_accuracy.data)
+                        reduced_top1 = Utilities.reduce_tensor(contrastive_top_1_accuracy.data, args.world_size)
+                        reduced_top5 = Utilities.reduce_tensor(contrastive_top_5_accuracy.data, args.world_size)
                 else:
                         reduced_top1 = contrastive_top_1_accuracy.data
                         reduced_top5 = contrastive_top_5_accuracy.data
 
 
-                top1_prec.update(to_python_float(reduced_top1), pipe2_output[0][5].size(0))
-                top5_prec.update(to_python_float(reduced_top5), pipe2_output[0][5].size(0))
+                top1_prec.update(Utilities.to_python_float(reduced_top1), pipe2_output[0][0].size(0))
+                top5_prec.update(Utilities.to_python_float(reduced_top5), pipe2_output[0][0].size(0))
 
                 # measure elapsed time
                 batch_time.update((time() - end)/args.print_freq)
@@ -635,23 +701,6 @@ def validate(arguments):
 
 
 
-class AverageMeter(object):
-    """Computes and stores the average current value"""
-
-    def __init__(self):
-        self.reset()
-    
-    def reset(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-    
-    def update(self, val, n=1):
-        self.val = val
-        self.sum += val * n
-        self.count += n
-        self.avg = self.sum / self.count
 
 
 
@@ -663,35 +712,7 @@ class AverageMeter(object):
 
 
 
-def compute_shard_size(pipe, reader_name):
-        meta_data = pipe.reader_meta()[reader_name]
 
-        if meta_data['pad_last_batch'] == 1:
-                shards_beg = np.floor(meta_data['shard_id'] * meta_data['epoch_size_padded'] / meta_data['number_of_shards']).astype(np.int)
-                shards_end = np.floor((meta_data['shard_id'] + 1) * meta_data['epoch_size_padded'] / meta_data['number_of_shards']).astype(np.int)
-        else:
-                shards_beg = np.floor(meta_data['shard_id'] * meta_data['epoch_size'] / meta_data['number_of_shards']).astype(np.int)
-                shards_end = np.floor((meta_data['shard_id'] + 1) * meta_data['epoch_size'] / meta_data['number_of_shards']).astype(np.int)
-
-        return shards_end - shards_beg
-
-
-
-
-
-def reduce_tensor(tensor):
-        rt = tensor.clone()
-        dist.all_reduce(rt, op=dist.reduce_op.SUM)
-        rt /= args.world_size
-        return rt
-
-
-# item() is a recent addition, so this helps with backward compatibility.
-def to_python_float(t):
-        if hasattr(t, 'item'):
-                return t.item()
-        else:
-                return t[0]
 
 
 if __name__ == '__main__':
