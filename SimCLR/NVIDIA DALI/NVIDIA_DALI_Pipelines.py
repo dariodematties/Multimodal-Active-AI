@@ -49,7 +49,7 @@ class COCOReader(Pipeline):
 
     def define_graph(self):
         rng = self.coin()
-        inputs, bboxes, labels = self.input()
+        inputs, bboxes, labels = self.input(name="COCOReader")
         images = self.decode(inputs)
         
         images = self.flip(images, horizontal=rng)
@@ -73,6 +73,22 @@ class ImageCollector(object):
         return self.data
     next = __next__
 
+
+
+
+
+
+
+
+
+class LabelCollector(object):
+    def __init__(self):
+        pass
+    def __iter__(self):
+        return self
+    def __next__(self):
+        return self.data
+    next = __next__
 
 
 
@@ -133,6 +149,73 @@ class FixationCommand(object):
 
 
 
+
+
+class ColorCommand(object):
+    def __init__(self, batch_size):
+        self.batch_size = batch_size
+
+    def _get_vectors(self):
+        global brightness
+        global contrast
+        global hue
+        global saturation
+        if 'brightness' in globals() and 'contrast' in globals() and 'hue' in globals() and 'saturation' in globals():
+            self.vector1 = brightness
+            self.vector2 = contrast
+            self.vector3 = hue
+            self.vector4 = saturation
+
+        else:
+            print('Initialating color\n')
+            brightness = torch.rand((self.batch_size,1))*2
+            contrast   = torch.rand((self.batch_size,1))*2
+            hue        = torch.rand((self.batch_size,1))*360
+            saturation = torch.rand((self.batch_size,1))
+
+            self.vector1 = brightness
+            self.vector2 = contrast
+            self.vector3 = hue
+            self.vector4 = saturation
+
+    def __iter__(self):
+        self._get_vectors()
+        assert len(self.vector1) == self.batch_size
+        assert len(self.vector2) == self.batch_size
+        assert len(self.vector3) == self.batch_size
+        assert len(self.vector4) == self.batch_size
+        self.i = 0
+        self.n = len(self.vector1)
+        return self
+
+    def __next__(self):
+        batch1 = []
+        batch2 = []
+        batch3 = []
+        batch4 = []
+        self._get_vectors()
+        for _ in range(self.batch_size):
+            element1 = self.vector1[self.i]
+            batch1.append(element1)
+            element2 = self.vector2[self.i]
+            batch2.append(element2)
+            element3 = self.vector3[self.i]
+            batch3.append(element3)
+            element4 = self.vector4[self.i]
+            batch4.append(element4)
+            self.i = (self.i + 1) % self.n
+        return batch1, batch2, batch3, batch4
+
+
+
+
+
+
+
+
+
+
+# This pipeline is for image plotting, presentation and exhibition purposes
 class FoveatedRetinalProcessor(Pipeline):
     def __init__(self, batch_size, num_threads, device_id,
                  fixation_information, images,
@@ -184,6 +267,149 @@ class FoveatedRetinalProcessor(Pipeline):
         sized4   = self.resize_one(cropped4)
         
         return (cropped0, cropped1, cropped2, cropped3, cropped4, sized0, sized1, sized2, sized3, sized4)
+
+
+
+
+
+
+
+
+
+
+
+class UnlabeledFoveatedRetinalProcessor(Pipeline):
+    def __init__(self, batch_size, num_threads, device_id,
+                 fixation_information, color_information, images,
+                 dali_cpu=False):
+
+        super(UnlabeledFoveatedRetinalProcessor, self).__init__(batch_size,
+                                                       num_threads,
+                                                       device_id,
+                                                       seed=15 + device_id,
+                                                       exec_pipelined=False,
+                                                       exec_async=False,
+                                                       prefetch_queue_depth=1)
+
+        #let user decide which pipeline works him bets for RN version he runs
+        dali_device = 'cpu' if dali_cpu else 'gpu'
+
+        self.resize_zero = ops.Resize(device = dali_device, resize_x = 640, resize_y = 640)
+        
+        self.rotate = ops.Rotate(device = dali_device)
+        
+        self.resize_one  = ops.Resize(device = dali_device, resize_x = 30, resize_y = 30)
+
+        self.crop_zero  = ops.Crop(device = dali_device, crop_h = 640, crop_w = 640)
+        self.crop_one   = ops.Crop(device = dali_device, crop_h = 400, crop_w = 400)
+        self.crop_two   = ops.Crop(device = dali_device, crop_h = 240, crop_w = 240)
+        self.crop_three = ops.Crop(device = dali_device, crop_h = 100, crop_w = 100)
+        self.crop_four  = ops.Crop(device = dali_device, crop_h = 30, crop_w = 30)
+
+        self.flip   = ops.Flip(device="gpu")
+        self.color  = ops.ColorTwist(device='gpu')
+
+        self.flip_coin = ops.CoinFlip(probability=0.5)
+        
+        self.img_batch = ops.ExternalSource(device=dali_device, source = images)
+        self.fixation_source = ops.ExternalSource(source = fixation_information, num_outputs = 3)
+        self.color_source = ops.ExternalSource(source = color_information, num_outputs = 4)
+
+    def define_graph(self):
+        flip_rng = self.flip_coin()
+
+        images = self.img_batch()
+
+        crop_pos_x, crop_pos_y, angle = self.fixation_source()
+
+        brightness, contrast, hue, saturation = self.color_source()
+        
+        images   = self.rotate(self.resize_zero(images), angle=angle)
+
+        images = self.flip(images, horizontal=flip_rng)
+        images = self.color(images, brightness=brightness, contrast=contrast, hue=hue, saturation=saturation)
+
+        cropped0 = self.crop_zero(images)
+        cropped1 = self.crop_one(cropped0, crop_pos_x=crop_pos_x, crop_pos_y=crop_pos_y)
+        cropped2 = self.crop_two(cropped0, crop_pos_x=crop_pos_x, crop_pos_y=crop_pos_y)
+        cropped3 = self.crop_three(cropped0, crop_pos_x=crop_pos_x, crop_pos_y=crop_pos_y)
+        cropped4 = self.crop_four(cropped0, crop_pos_x=crop_pos_x, crop_pos_y=crop_pos_y)
+        
+        sized0   = self.resize_one(cropped0)
+        sized1   = self.resize_one(cropped1)
+        sized2   = self.resize_one(cropped2)
+        sized3   = self.resize_one(cropped3)
+        sized4   = self.resize_one(cropped4)
+        
+        return (sized0, sized1, sized2, sized3, sized4)
+
+
+
+
+
+
+
+
+
+
+class LabeledFoveatedRetinalProcessor(Pipeline):
+    def __init__(self, batch_size, num_threads, device_id,
+                 fixation_information, images, labels,
+                 dali_cpu=False):
+
+        super(LabeledFoveatedRetinalProcessor, self).__init__(batch_size,
+                                                       num_threads,
+                                                       device_id,
+                                                       seed=15 + device_id,
+                                                       exec_pipelined=False,
+                                                       exec_async=False,
+                                                       prefetch_queue_depth=1)
+
+        #let user decide which pipeline works him bets for RN version he runs
+        dali_device = 'cpu' if dali_cpu else 'gpu'
+
+        self.resize_zero = ops.Resize(device = dali_device, resize_x = 640, resize_y = 640)
+        
+        self.rotate = ops.Rotate(device = dali_device)
+        
+        self.resize_one  = ops.Resize(device = dali_device, resize_x = 30, resize_y = 30)
+
+        self.crop_zero  = ops.Crop(device = dali_device, crop_h = 640, crop_w = 640)
+        self.crop_one   = ops.Crop(device = dali_device, crop_h = 400, crop_w = 400)
+        self.crop_two   = ops.Crop(device = dali_device, crop_h = 240, crop_w = 240)
+        self.crop_three = ops.Crop(device = dali_device, crop_h = 100, crop_w = 100)
+        self.crop_four  = ops.Crop(device = dali_device, crop_h = 30, crop_w = 30)
+        
+        self.img_batch = ops.ExternalSource(device=dali_device, source = images)
+        self.label_batch = ops.ExternalSource(device=dali_device, source = labels)
+        self.fixation_source = ops.ExternalSource(source = fixation_information, num_outputs = 3)
+
+    def define_graph(self):
+        images = self.img_batch()
+        labels = self.label_batch()
+
+        crop_pos_x, crop_pos_y, angle = self.fixation_source()
+        
+        images   = self.rotate(self.resize_zero(images), angle=angle)
+
+        cropped0 = self.crop_zero(images)
+        cropped1 = self.crop_one(cropped0, crop_pos_x=crop_pos_x, crop_pos_y=crop_pos_y)
+        cropped2 = self.crop_two(cropped0, crop_pos_x=crop_pos_x, crop_pos_y=crop_pos_y)
+        cropped3 = self.crop_three(cropped0, crop_pos_x=crop_pos_x, crop_pos_y=crop_pos_y)
+        cropped4 = self.crop_four(cropped0, crop_pos_x=crop_pos_x, crop_pos_y=crop_pos_y)
+        
+        sized0   = self.resize_one(cropped0)
+        sized1   = self.resize_one(cropped1)
+        sized2   = self.resize_one(cropped2)
+        sized3   = self.resize_one(cropped3)
+        sized4   = self.resize_one(cropped4)
+        
+        return (sized0, sized1, sized2, sized3, sized4, labels)
+
+
+
+
+
 
 
 
@@ -257,10 +483,37 @@ class ImagenetReader(Pipeline):
 
     def define_graph(self):
         rng = self.coin()
-        inputs, labels = self.input()
+        inputs, labels = self.input(name="ImagesReader")
         images = self.decode(inputs)
         
         images = self.flip(images, horizontal=rng)
         
         return (images, labels)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def compute_shard_size(pipe, reader_name):
+        meta_data = pipe.reader_meta()[reader_name]
+
+        if meta_data['pad_last_batch'] == 1:
+                shards_beg = np.floor(meta_data['shard_id'] * meta_data['epoch_size_padded'] / meta_data['number_of_shards']).astype(np.int)
+                shards_end = np.floor((meta_data['shard_id'] + 1) * meta_data['epoch_size_padded'] / meta_data['number_of_shards']).astype(np.int)
+        else:
+                shards_beg = np.floor(meta_data['shard_id'] * meta_data['epoch_size'] / meta_data['number_of_shards']).astype(np.int)
+                shards_end = np.floor((meta_data['shard_id'] + 1) * meta_data['epoch_size'] / meta_data['number_of_shards']).astype(np.int)
+
+        return shards_end - shards_beg
+
 
