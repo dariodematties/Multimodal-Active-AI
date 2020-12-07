@@ -453,7 +453,8 @@ def pytorch_wrapper(pipes):
 class ImagenetReader(Pipeline):
     def __init__(self, batch_size, num_threads, device_id,
                  file_root,
-                 shard_id, num_shards, dali_cpu=False):
+                 shard_id, num_shards,
+                 random_shuffle=False, dali_cpu=False):
 
         super(ImagenetReader, self).__init__(batch_size,
                                          num_threads,
@@ -467,7 +468,7 @@ class ImagenetReader(Pipeline):
                                     shard_id = shard_id,
                                     num_shards = num_shards,
                                     pad_last_batch=True,
-                                    random_shuffle=False)
+                                    random_shuffle=random_shuffle)
 
         #let user decide which pipeline works him bets for RN version he runs
         dali_device = 'cpu' if dali_cpu else 'gpu'
