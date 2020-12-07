@@ -79,7 +79,7 @@ def parse():
                             metavar='N', help='mini-batch size per process (default: 256)')
         parser.add_argument('-f', '--num-fixations', default=2, type=int,
                             metavar='F', help='Number of fixations per image (default: 2)')
-        parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
+        parser.add_argument('--lr', '--learning-rate', default=0.0001, type=float,
                             metavar='LR',
                             help='Initial learning rate.  Will be scaled by <global batch size>/256:\n' +
                             'args.lr = args.lr*float(args.batch_size*args.world_size)/256.\n' +
@@ -178,6 +178,7 @@ def main():
                                            file_root=file_root,
                                            shard_id=args.local_rank,
                                            num_shards=args.world_size,
+                                           random_shuffle=True,
                                            dali_cpu=args.dali_cpu)
 
                 pipe1_reader_name = 'ImagesReader'
@@ -283,7 +284,7 @@ def main():
 
 
         # Set fuction_f
-        function_f = rn.ResNet.ResNet50()
+        function_f = rn.ResNet.ResNet18()
         function_f = function_f.to(device)
         if args.verbose:
                print('function_f created from global rank number {}, local rank {}' .format(args.global_rank, args.local_rank))
@@ -369,14 +370,25 @@ def main():
         if args.global_rank==0 and args.verbose:
                 print('Optimizer used for this run is {}'.format(args.optimizer))
 
-
-
-
-
-
-
-
-
+        # Optionally resume from a checkpoint
+        if args.resume:
+             # Use a local scope to avoid dangling references
+             def resume():
+                if os.path.isfile(args.resume):
+                    print("=> loading classifier checkpoint '{}'" .format(args.resume))
+                    checkpoint = torch.load(args.resume, map_location = lambda storage, loc: storage.cuda(args.gpu))
+                    start_epoch = checkpoint['epoch']
+                    best_prec1 = checkpoint['best_prec1']
+                    classifier.load_state_dict(checkpoint['state_dict'])
+                    optimizer.load_state_dict(checkpoint['optimizer'])
+                    print("=> loaded classifier checkpoint '{}' (epoch {})"
+                                    .format(args.resume, checkpoint['epoch']))
+                    print("Classifier best precision saved was {}" .format(best_prec1))
+                    return start_epoch, best_prec1, classifier, optimizer
+                else:
+                    print("=> no checkpoint found at '{}'" .format(args.resume))
+        
+             args.start_epoch, best_prec1, classifier, optimizer = resume()
 
 
         total_time = Utilities.AverageMeter()
@@ -410,6 +422,32 @@ def main():
                 if args.test:
                         break
 
+                # evaluate on validation set
+                [prec1, prec5] = val_classifier(arguments)
+
+                # remember the best prec@1 and save checkpoint
+                if args.global_rank == 0:
+                        print('From validation we have prec1 is {} while best_prec1 is {}'.format(prec1, best_prec1))
+                        is_best = prec1 > best_prec1
+                        best_prec1 = max(prec1, best_prec1)
+                        Model_Util.save_checkpoint({
+                                'epoch': epoch + 1,
+                                'state_dict': classifier.state_dict(),
+                                'best_prec1': best_prec1,
+                                'optimizer': optimizer.state_dict(),
+                        }, is_best, filename='classifier_checkpoint.pth.tar', best_filename='classifier_best.pth.tar')
+
+                        print('##Top-1 ACC {0}\n'
+                              '##Top-5 ACC {1}\n'
+                              '##Best Top-1 ACC saved {2}\n'
+                              '##Perf {3}'.format(
+                              prec1,
+                              prec5,
+                              best_prec1,
+                              args.total_batch_size / total_time.avg))
+
+                pipe1.reset()
+                pipe3.reset()
 
 
 
@@ -487,6 +525,9 @@ def train_classifier(arguments):
 
                 inputs = []
                 with torch.no_grad():
+                        # set fixation angle for pipe2
+                        NDP.fixation_angle = torch.repeat_interleave(torch.Tensor([0.0]), args.batch_size).view(-1,1)
+                        # NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*10
                         for j in range(args.num_fixations):
                                 # set fixation position y for pipe2
                                 pos_y = (0.5 + j) / args.num_fixations
@@ -496,9 +537,6 @@ def train_classifier(arguments):
                                         # set fixation position x for pipe2
                                         pos_x = (0.5 + k) / args.num_fixations
                                         NDP.fixation_pos_x = torch.repeat_interleave(torch.Tensor([pos_x]), arguments['batch_size']).view(-1,1)
-
-                                        # set fixation angle for pipe2
-                                        NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*60
 
                                         # make the fixation
                                         pipe2_output = NDP.pytorch_wrapper([arguments['pipe2']])
@@ -565,6 +603,124 @@ def train_classifier(arguments):
 
 
         return batch_time.avg
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def val_classifier(arguments):
+        batch_time = Utilities.AverageMeter()
+        top1_prec = Utilities.AverageMeter()
+        top5_prec = Utilities.AverageMeter()
+
+        # switch model to evaluate mode
+        arguments['model'].eval()
+        arguments['classifier'].eval()
+        end = time()
+
+        shard_size = NDP.compute_shard_size(arguments['pipe3'], arguments['pipe1_reader_name'])
+        i = 0
+        while i*arguments['pipe3'].batch_size < shard_size:
+                # bring a new batch
+                pipe1_output = arguments['pipe3'].run()
+                images_gpu = pipe1_output[0]
+                labels_cpu = pipe1_output[1]
+
+                val_loader_len = int(math.ceil(shard_size / arguments['pipe3'].batch_size))
+
+                # set images and labels for pipe2
+                arguments['images'].data = images_gpu
+                arguments['labels'].data = labels_cpu
+
+                inputs = []
+                with torch.no_grad():
+                        # set fixation angle for pipe2
+                        NDP.fixation_angle = torch.repeat_interleave(torch.Tensor([0.0]), args.batch_size).view(-1,1)
+                        # NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*10
+                        for j in range(args.num_fixations):
+                                # set fixation position y for pipe2
+                                pos_y = (0.5 + j) / args.num_fixations
+                                NDP.fixation_pos_y = torch.repeat_interleave(torch.Tensor([pos_y]), arguments['batch_size']).view(-1,1)
+
+                                for k in range(args.num_fixations):
+                                        # set fixation position x for pipe2
+                                        pos_x = (0.5 + k) / args.num_fixations
+                                        NDP.fixation_pos_x = torch.repeat_interleave(torch.Tensor([pos_x]), arguments['batch_size']).view(-1,1)
+
+                                        # make the fixation
+                                        pipe2_output = NDP.pytorch_wrapper([arguments['pipe2']])
+                                        fixation = arguments['model'](pipe2_output[0][:5])
+                                        fixation = fixation.view(arguments['batch_size'], 512*4*4)
+                                        inputs.append(fixation)
+
+                        inputs = torch.stack(inputs, dim=2)
+                        inputs = inputs.view(arguments['batch_size'], 512*4*4*args.num_fixations**2)
+
+
+                # bring the labels of this batch of images
+                labels = pipe2_output[0][5]
+                labels = torch.transpose(labels,0,1).squeeze(0)
+
+                # Forward pass
+                logits = arguments['classifier'](inputs)
+
+                # compute top 1 and top 5 classification accuracy
+                top_1_accuracy = Model_Util.top_k_accuracy(logits, labels, 1)
+                top_5_accuracy = Model_Util.top_k_accuracy(logits, labels, 5)
+
+
+                if args.distributed:
+                        reduced_top1 = Utilities.reduce_tensor(top_1_accuracy.data, args.world_size)
+                        reduced_top5 = Utilities.reduce_tensor(top_5_accuracy.data, args.world_size)
+                else:
+                        reduced_top1 = top_1_accuracy.data
+                        reduced_top5 = top_5_accuracy.data
+
+
+                top1_prec.update(Utilities.to_python_float(reduced_top1), pipe2_output[0][0].size(0))
+                top5_prec.update(Utilities.to_python_float(reduced_top5), pipe2_output[0][0].size(0))
+
+                # measure elapsed time
+                batch_time.update((time() - end)/args.print_freq)
+                end = time()
+
+                if args.local_rank == 0 and i % args.print_freq == 0:
+                        print('Test: [{0}/{1}]\t'
+                              'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                              'Speed {2:.3f} ({3:.3f})\t'
+                              'Top-1 Acc {top1.val:.4f} ({top1.avg:.4f})\t'
+                              'Top-5 Acc {top5.val:.4f} ({top5.avg:.4f})'.format(
+                              i, val_loader_len,
+                              args.world_size*args.batch_size/batch_time.val,
+                              args.world_size*args.batch_size/batch_time.avg,
+                              batch_time=batch_time,
+                              top1=top1_prec,
+                              top5=top5_prec))
+
+                i += 1
+
+
+        return [top1_prec.avg, top5_prec.avg]
+
+
+
+
+
+
+
+
+
 
 
 
