@@ -92,18 +92,22 @@ def get_optimizer(model, args):
 
 
 
-def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
+def save_checkpoint(state, is_best, filename='checkpoint.pth.tar', best_filename='model_best.pth.tar'):
         torch.save(state, filename)
         if is_best:
                 print('Saving a new best model with precesion {}'.format(state['best_prec1']))
-                shutil.copyfile(filename, 'model_best.pth.tar')
+                shutil.copyfile(filename, best_filename)
 
 
 
 
 def top_k_accuracy(preds, target, k):
         a=torch.transpose(torch.topk(preds,k=k,dim=1)[1],0,1)
-        b=torch.argmax(target,dim=1)
+        if len(target.shape) == 1:
+                b=target
+        else:
+                b=torch.argmax(target,dim=1)
+
         c=a==b
         d=torch.any(c,dim=0)
         return torch.sum(d)/(d.shape[0] + 0.0)
