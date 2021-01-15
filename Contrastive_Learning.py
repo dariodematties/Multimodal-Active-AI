@@ -30,6 +30,7 @@ import argparse
 import sys
 import os
 import math
+import socket
 
 import random
 import numpy as np
@@ -40,7 +41,6 @@ import torch.distributed.autograd as dist_autograd
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed.optim import DistributedOptimizer
 from torch.distributed.rpc import RRef
-from pytorch_lightning.metrics import Accuracy
 
 from time import time
 
@@ -56,7 +56,43 @@ import Objective
 import Model_Util
 import Utilities
 
+# Set global variables for rank, local_rank, world size
+try:
+    from mpi4py import MPI
+
+    with_ddp=True
+    local_rank = os.environ['OMPI_COMM_WORLD_LOCAL_RANK']
+    size = MPI.COMM_WORLD.Get_size()
+    rank = MPI.COMM_WORLD.Get_rank()
+
+
+    # Pytorch will look for these:
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(size)
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(local_rank)
+
+    # It will want the master address too, which we'll broadcast:
+    if rank == 0:
+        master_addr = socket.gethostname()
+    else:
+        master_addr = None
+
+    master_addr = MPI.COMM_WORLD.bcast(master_addr, root=0)
+    os.environ["MASTER_ADDR"] = master_addr
+    os.environ["MASTER_PORT"] = str(2345)
+
+
+except Exception as e:
+    with_ddp=False
+    local_rank = 0
+    size = 1
+    rank = 0
+    print("MPI initialization failed!")
+    print(e)
+
+
 def parse():
+        model_names = ['ResNet18', 'ResNet34', 'ResNet50', 'ResNet101', 'ResNet152']
 
         datasets = ['mscoco', 'imagenet']
 
@@ -66,6 +102,11 @@ def parse():
                                          description='This program executes the Contrastive Learning Algorithm using foveated saccades')
         parser.add_argument('data', metavar='DIR', type=str,
                             help='path to MSCOCO or IMAGENET dataset')
+        parser.add_argument('--arch', '-a', metavar='ARCH', default='ResNet18',
+                            choices=model_names,
+                            help='model architecture: ' +
+                            ' | '.join(model_names) +
+                            ' (default: ResNet18)')
         parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                             help='number of data loading workers (default: 4)')
         parser.add_argument('--epochs', default=90, type=int, metavar='N',
@@ -76,7 +117,7 @@ def parse():
                             metavar='N', help='mini-batch size per process (default: 256)')
         parser.add_argument('-f', '--num-fixations', default=10, type=int,
                             metavar='F', help='Number of fixations per image (default: 10)')
-        parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
+        parser.add_argument('--lr', '--learning-rate', default=0.01, type=float,
                             metavar='LR', help='Initial learning rate.  By default, it will be scaled by <global batch size>/256: args.lr = args.lr*float(args.batch_size*args.world_size)/256. A warmup schedule will also be applied over the first --warmup_epochs epochs.')
         parser.add_argument('--lrs', '--learning-rate-scaling', default='linear', type=str,
                             metavar='LRS', help='Function to scale the learning rate value (default: \'linear\').')
@@ -114,6 +155,14 @@ def parse():
                             help='Launch test mode with preset arguments')
         parser.add_argument('-v', '--verbose', action='store_true',
                             help='provides additional details as to what the program is doing')
+        parser.add_argument('--brightness', default=1.0, type=float,
+                metavar='BRIGHTNESS', help='Brightness value for color augmentation (range: [0.0 - 2.0] default: 1.0).')
+        parser.add_argument('--contrast', default=1.0, type=float,
+                metavar='CONTRAST', help='Contrast value for color augmentation (range: [0.0 - 2.0] default: 1.0).')
+        parser.add_argument('--hue', default=90.0, type=float,
+                metavar='HUE', help='Hue value for color augmentation (range: [0.0 - 360.0] default: 90.0).')
+        parser.add_argument('--saturation', default=0.5, type=float,
+                metavar='SATURATION', help='Saturation value for color augmentation (range: [0.0 - 1.0] default: 0.5).')
         args = parser.parse_args()
         return args
 
@@ -136,14 +185,15 @@ def main():
         args.world_size = 1
         
         if args.distributed:
-                args.gpu = args.local_rank
 
-                torch.cuda.set_device(args.gpu)
-                # torch.distributed.init_process_group(backend='mpi', init_method='env://')
-                torch.distributed.init_process_group(backend='gloo', init_method='env://')
-                # torch.distributed.init_process_group(backend='nccl', init_method='env://')
+                torch.distributed.init_process_group(backend='nccl', init_method='env://')
                 args.world_size = torch.distributed.get_world_size()
                 args.global_rank = torch.distributed.get_rank()
+
+                args.local_rank = int(local_rank)
+                args.gpu = 0
+                torch.cuda.set_device(args.gpu)
+
                 if args.verbose:
                         print('distributed is True, then world size is {}, global rank is {} and local rank number {} is mapped in device number {}'
                               .format(args.world_size, args.global_rank, args.local_rank, args.gpu))
@@ -159,14 +209,32 @@ def main():
 
 
         # Set fuction_f
-        function_f = rn.ResNet.ResNet50()
+        if args.arch == 'ResNet18':
+            function_f = rn.ResNet.ResNet18()
+        elif args.arch == 'ResNet34':
+            function_f = rn.ResNet.ResNet34()
+        elif args.arch == 'ResNet50':
+            function_f = rn.ResNet.ResNet50()
+        elif args.arch == 'ResNet101':
+            function_f = rn.ResNet.ResNet101()
+        elif args.arch == 'ResNet152':
+            function_f = rn.ResNet.ResNet152()
+        else:
+            raise Exception("error: Unrecognized {} architecture" .format(args.arch))
+
         function_f = function_f.to(device)
         if args.verbose:
                print('function_f created from global rank number {}, local rank {}' .format(args.global_rank, args.local_rank))
         
 
         # Set function_g
-        function_g = mlp.MLP(512*4*4, 1024, 128)
+        if args.arch == 'ResNet18' or args.arch == 'ResNet34':
+            function_g = mlp.MLP(512*4*4, 1024, 128)
+        elif args.arch == 'ResNet50' or args.arch == 'ResNet101' or args.arch == 'ResNet152':
+            function_g = mlp.MLP(2048*4*4, 1024, 128)
+        else:
+            raise Exception("error: Unrecognized {} architecture" .format(args.arch))
+
         function_g = function_g.to(device)
         if args.verbose:
                print('function_g created from global rank number {}, local rank {}' .format(args.global_rank, args.local_rank))
@@ -190,10 +258,10 @@ def main():
 
                 pipe1 = NDP.COCOReader(batch_size=args.batch_size,
                                        num_threads=args.workers,
-                                       device_id=args.local_rank,
+                                       device_id=args.gpu,
                                        file_root=file_root,
                                        annotations_file=annotations_file,
-                                       shard_id=args.local_rank,
+                                       shard_id=args.gpu,
                                        num_shards=args.world_size,
                                        dali_cpu=args.dali_cpu)
 
@@ -204,9 +272,9 @@ def main():
 
                 pipe1 = NDP.ImagenetReader(batch_size=args.batch_size,
                                            num_threads=args.workers,
-                                           device_id=args.local_rank,
+                                           device_id=args.gpu,
                                            file_root=file_root,
-                                           shard_id=args.local_rank,
+                                           shard_id=args.gpu,
                                            num_shards=args.world_size,
                                            dali_cpu=args.dali_cpu)
 
@@ -234,7 +302,7 @@ def main():
         color = NDP.ColorCommand(args.batch_size)
         pipe2 = NDP.UnlabeledFoveatedRetinalProcessor(batch_size=args.batch_size,
                                                       num_threads=args.workers,
-                                                      device_id=args.local_rank,
+                                                      device_id=args.gpu,
                                                       fixation_information=fixation,
                                                       color_information=color,
                                                       images=images,
@@ -265,10 +333,10 @@ def main():
 
                 pipe3 = NDP.COCOReader(batch_size=args.batch_size,
                                        num_threads=args.workers,
-                                       device_id=args.local_rank,
+                                       device_id=args.gpu,
                                        file_root=file_root,
                                        annotations_file=annotations_file,
-                                       shard_id=args.local_rank,
+                                       shard_id=args.gpu,
                                        num_shards=args.world_size,
                                        dali_cpu=args.dali_cpu)
 
@@ -279,9 +347,9 @@ def main():
 
                 pipe3 = NDP.ImagenetReader(batch_size=args.batch_size,
                                            num_threads=args.workers,
-                                           device_id=args.local_rank,
+                                           device_id=args.gpu,
                                            file_root=file_root,
-                                           shard_id=args.local_rank,
+                                           shard_id=args.gpu,
                                            num_shards=args.world_size,
                                            dali_cpu=args.dali_cpu)
 
@@ -458,14 +526,18 @@ def train(arguments):
                 # set fixation parameters for pipe2
                 NDP.fixation_pos_x = torch.rand((args.batch_size,1))
                 NDP.fixation_pos_y = torch.rand((args.batch_size,1))
-                NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*260
+                NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*160
 
                 # set color parameters for pipe2
                 if random.uniform(0, 1) < args.color_augmentation:
-                        NDP.brightness = torch.rand((args.batch_size,1))*2
-                        NDP.contrast = torch.rand((args.batch_size,1))*2
-                        NDP.hue = torch.rand((args.batch_size,1))*360
-                        NDP.saturation = torch.rand((args.batch_size,1))
+                        # brightnes goes from 0 to 2
+                        NDP.brightness = (1 - args.brightness/2) + args.brightness*torch.rand((args.batch_size,1))
+                        # contrast goes from 0 to 2
+                        NDP.contrast = (1 - args.contrast/2) + args.contrast*torch.rand((args.batch_size,1))
+                        # hue goes from 0 to 360
+                        NDP.hue = torch.rand((args.batch_size,1))*args.hue
+                        # saturation goes from 0 to 1
+                        NDP.saturation = (1 - args.saturation) + args.saturation*torch.rand((args.batch_size,1))
                 else:
                         NDP.brightness = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).view(-1,1)
                         NDP.contrast = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).view(-1,1)
@@ -480,14 +552,18 @@ def train(arguments):
                         # set the second round of fixation parameters for pipe2
                         NDP.fixation_pos_x = torch.rand((args.batch_size,1))
                         NDP.fixation_pos_y = torch.rand((args.batch_size,1))
-                        NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*260
+                        NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*160
                         
                         # set color parameters for pipe2
                         if random.uniform(0, 1) < args.color_augmentation:
-                                NDP.brightness = torch.rand((args.batch_size,1))*2
-                                NDP.contrast = torch.rand((args.batch_size,1))*2
-                                NDP.hue = torch.rand((args.batch_size,1))*360
-                                NDP.saturation = torch.rand((args.batch_size,1))
+                                # brightnes goes from 0 to 2
+                                NDP.brightness = (1 - args.brightness/2) + args.brightness*torch.rand((args.batch_size,1))
+                                # contrast goes from 0 to 2
+                                NDP.contrast = (1 - args.contrast/2) + args.contrast*torch.rand((args.batch_size,1))
+                                # hue goes from 0 to 360
+                                NDP.hue = torch.rand((args.batch_size,1))*args.hue
+                                # saturation goes from 0 to 1
+                                NDP.saturation = (1 - args.saturation) + args.saturation*torch.rand((args.batch_size,1))
                         else:
                                 NDP.brightness = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).view(-1,1)
                                 NDP.contrast = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).view(-1,1)
@@ -539,7 +615,7 @@ def train(arguments):
                         batch_time.update((time() - end)/args.print_freq)
                         end = time()
 
-                        if args.local_rank == 0:
+                        if args.global_rank == 0:
                                 print('Epoch: [{0}][{1}/{2}]\t'
                                       'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                                       'Speed {3:.3f} ({4:.3f})\t'
@@ -573,8 +649,6 @@ def validate(arguments):
 
         end = time()
 
-        accuracy = Accuracy()
-
         shard_size = NDP.compute_shard_size(arguments['pipe3'], arguments['pipe3_reader_name'])
         i = 0
         while i*arguments['pipe3'].batch_size < shard_size:
@@ -594,14 +668,18 @@ def validate(arguments):
                         # set fixation parameters for pipe2
                         NDP.fixation_pos_x = torch.rand((args.batch_size,1))
                         NDP.fixation_pos_y = torch.rand((args.batch_size,1))
-                        NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*60
+                        NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*160
 
                         # set color parameters for pipe2
                         if random.uniform(0, 1) < args.color_augmentation:
-                                NDP.brightness = torch.rand((args.batch_size,1))*2
-                                NDP.contrast = torch.rand((args.batch_size,1))*2
-                                NDP.hue = torch.rand((args.batch_size,1))*360
-                                NDP.saturation = torch.rand((args.batch_size,1))
+                                # brightnes goes from 0 to 2
+                                NDP.brightness = (1 - args.brightness/2) + args.brightness*torch.rand((args.batch_size,1))
+                                # contrast goes from 0 to 2
+                                NDP.contrast = (1 - args.contrast/2) + args.contrast*torch.rand((args.batch_size,1))
+                                # hue goes from 0 to 360
+                                NDP.hue = torch.rand((args.batch_size,1))*args.hue
+                                # saturation goes from 0 to 1
+                                NDP.saturation = (1 - args.saturation) + args.saturation*torch.rand((args.batch_size,1))
                         else:
                                 NDP.brightness = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).view(-1,1)
                                 NDP.contrast = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).view(-1,1)
@@ -615,14 +693,18 @@ def validate(arguments):
                         # set the second round of fixation parameters for pipe2
                         NDP.fixation_pos_x = torch.rand((args.batch_size,1))
                         NDP.fixation_pos_y = torch.rand((args.batch_size,1))
-                        NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*60
+                        NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*160
                         
                         # set the second round of color parameters for pipe2
                         if random.uniform(0, 1) < args.color_augmentation:
-                                NDP.brightness = torch.rand((args.batch_size,1))*2
-                                NDP.contrast = torch.rand((args.batch_size,1))*2
-                                NDP.hue = torch.rand((args.batch_size,1))*360
-                                NDP.saturation = torch.rand((args.batch_size,1))
+                                # brightnes goes from 0 to 2
+                                NDP.brightness = (1 - args.brightness/2) + args.brightness*torch.rand((args.batch_size,1))
+                                # contrast goes from 0 to 2
+                                NDP.contrast = (1 - args.contrast/2) + args.contrast*torch.rand((args.batch_size,1))
+                                # hue goes from 0 to 360
+                                NDP.hue = torch.rand((args.batch_size,1))*args.hue
+                                # saturation goes from 0 to 1
+                                NDP.saturation = (1 - args.saturation) + args.saturation*torch.rand((args.batch_size,1))
                         else:
                                 NDP.brightness = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).view(-1,1)
                                 NDP.contrast = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).view(-1,1)
@@ -641,7 +723,6 @@ def validate(arguments):
                                                                           world_size=args.world_size,
                                                                           device=arguments['device'])
 
-                        # contrastive_top_1_accuracy = accuracy(torch.argmax(logits, dim=1).to('cpu'), torch.argmax(labels, dim=1).to('cpu'))
                         contrastive_top_1_accuracy = Model_Util.top_k_accuracy(logits, labels, 1)
                         contrastive_top_5_accuracy = Model_Util.top_k_accuracy(logits, labels, 5)
 
@@ -661,7 +742,7 @@ def validate(arguments):
                 batch_time.update((time() - end)/args.print_freq)
                 end = time()
 
-                if args.local_rank == 0 and i % args.print_freq == 0:
+                if args.global_rank == 0 and i % args.print_freq == 0:
                         print('Test: [{0}/{1}]\t'
                               'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                               'Speed {2:.3f} ({3:.3f})\t'
