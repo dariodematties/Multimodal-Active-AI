@@ -67,7 +67,7 @@ def contrastive_loss(hidden1, hidden2,
         logits_aa = torch.matmul(hidden1, torch.transpose(hidden1_large, 0, 1)) / temperature
         logits_aa = logits_aa - masks * LARGE_NUM
 
-        logits_bb = torch.matmul(hidden1, torch.transpose(hidden1_large, 0, 1)) / temperature
+        logits_bb = torch.matmul(hidden2, torch.transpose(hidden2_large, 0, 1)) / temperature
         logits_bb = logits_bb - masks * LARGE_NUM
 
         logits_ab = torch.matmul(hidden1, torch.transpose(hidden2_large, 0, 1)) / temperature
