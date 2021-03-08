@@ -11,6 +11,7 @@ import argparse
 import sys
 import os
 import math
+import socket
 
 import numpy as np
 import torch
@@ -22,7 +23,6 @@ import torch.distributed.autograd as dist_autograd
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed.optim import DistributedOptimizer
 from torch.distributed.rpc import RRef
-from pytorch_lightning.metrics import Accuracy
 
 from time import time
 
@@ -40,8 +40,44 @@ import Objective
 import Model_Util
 import Utilities
 
+# Set global variables for rank, local_rank, world size
+try:
+    from mpi4py import MPI
+
+    with_ddp=True
+    local_rank = os.environ['OMPI_COMM_WORLD_LOCAL_RANK']
+    size = MPI.COMM_WORLD.Get_size()
+    rank = MPI.COMM_WORLD.Get_rank()
+
+
+    # Pytorch will look for these:
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(size)
+    # os.environ['CUDA_VISIBLE_DEVICES'] = str(local_rank)
+
+    # It will want the master address too, which we'll broadcast:
+    if rank == 0:
+        master_addr = socket.gethostname()
+    else:
+        master_addr = None
+
+    master_addr = MPI.COMM_WORLD.bcast(master_addr, root=0)
+    os.environ["MASTER_ADDR"] = master_addr
+    os.environ["MASTER_PORT"] = str(2345)
+
+
+except Exception as e:
+    with_ddp=False
+    local_rank = 0
+    size = 1
+    rank = 0
+    print("MPI initialization failed!")
+    print(e)
+
+
 
 def parse():
+        model_names = ['ResNet18', 'ResNet34', 'ResNet50', 'ResNet101', 'ResNet152']
 
         datasets = ['imagenet']
 
@@ -56,6 +92,11 @@ def parse():
                             help='path to IMAGENET dataset')
         parser.add_argument('data', metavar='DATASET_DIR',
                             help='path to IMAGENET dataset')
+        parser.add_argument('--arch', '-a', metavar='ARCH', default='ResNet18',
+                            choices=model_names,
+                            help='model architecture: ' +
+                            ' | '.join(model_names) +
+                            ' (default: ResNet18)')
         parser.add_argument('--classifier', metavar='CLASSIFIER',
                             default='logistic_regression', type=str,
                             choices=classifiers,
@@ -79,14 +120,14 @@ def parse():
                             metavar='N', help='mini-batch size per process (default: 256)')
         parser.add_argument('-f', '--num-fixations', default=2, type=int,
                             metavar='F', help='Number of fixations per image (default: 2)')
-        parser.add_argument('--lr', '--learning-rate', default=0.0001, type=float,
+        parser.add_argument('--lr', '--learning-rate', default=0.00001, type=float,
                             metavar='LR',
                             help='Initial learning rate.  Will be scaled by <global batch size>/256:\n' +
                             'args.lr = args.lr*float(args.batch_size*args.world_size)/256.\n' +
                             'A warmup schedule will also be applied over the first 5 epochs.')
         parser.add_argument('--lrs', '--learning-rate-scaling', default='linear', type=str,
                             metavar='LRS', help='Function to scale the learning rate value (default: \'linear\').')
-        parser.add_argument('--warmup_epochs', default=10, type=int, metavar='W',
+        parser.add_argument('--warmup-epochs', default=10, type=int, metavar='W',
                             help='Number of warmup epochs (default: 10)')
         parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                             help='momentum')
@@ -137,14 +178,17 @@ def main():
         args.world_size = 1
         
         if args.distributed:
-                args.gpu = args.local_rank
 
-                torch.cuda.set_device(args.gpu)
                 # torch.distributed.init_process_group(backend='mpi', init_method='env://')
-                torch.distributed.init_process_group(backend='gloo', init_method='env://')
-                # torch.distributed.init_process_group(backend='nccl', init_method='env://')
+                # torch.distributed.init_process_group(backend='gloo', init_method='env://')
+                torch.distributed.init_process_group(backend='nccl', init_method='env://')
                 args.world_size = torch.distributed.get_world_size()
                 args.global_rank = torch.distributed.get_rank()
+
+                args.local_rank = int(local_rank)
+                args.gpu = args.local_rank
+                torch.cuda.set_device(args.gpu)
+
                 if args.verbose:
                         print('distributed is True, then world size is {}, global rank is {} and local rank number {} is mapped in device number {}'
                               .format(args.world_size, args.global_rank, args.local_rank, args.gpu))
@@ -174,9 +218,9 @@ def main():
 
                 pipe1 = NDP.ImagenetReader(batch_size=args.batch_size,
                                            num_threads=args.workers,
-                                           device_id=args.local_rank,
+                                           device_id=args.gpu,
                                            file_root=file_root,
-                                           shard_id=args.local_rank,
+                                           shard_id=args.gpu,
                                            num_shards=args.world_size,
                                            random_shuffle=True,
                                            dali_cpu=args.dali_cpu)
@@ -213,7 +257,7 @@ def main():
         fixation = NDP.FixationCommand(args.batch_size)
         pipe2 = NDP.LabeledFoveatedRetinalProcessor(batch_size=args.batch_size,
                                                     num_threads=args.workers,
-                                                    device_id=args.local_rank,
+                                                    device_id=args.gpu,
                                                     fixation_information=fixation,
                                                     images=images,
                                                     labels=labels,
@@ -246,9 +290,9 @@ def main():
 
                 pipe3 = NDP.ImagenetReader(batch_size=args.batch_size,
                                            num_threads=args.workers,
-                                           device_id=args.local_rank,
+                                           device_id=args.gpu,
                                            file_root=file_root,
-                                           shard_id=args.local_rank,
+                                           shard_id=args.gpu,
                                            num_shards=args.world_size,
                                            dali_cpu=args.dali_cpu)
 
@@ -284,14 +328,32 @@ def main():
 
 
         # Set fuction_f
-        function_f = rn.ResNet.ResNet18()
+        if args.arch == 'ResNet18':
+            function_f = rn.ResNet.ResNet18()
+        elif args.arch == 'ResNet34':
+            function_f = rn.ResNet.ResNet34()
+        elif args.arch == 'ResNet50':
+            function_f = rn.ResNet.ResNet50()
+        elif args.arch == 'ResNet101':
+            function_f = rn.ResNet.ResNet101()
+        elif args.arch == 'ResNet152':
+            function_f = rn.ResNet.ResNet152()
+        else:
+            raise Exception("error: Unrecognized {} architecture" .format(args.arch))
+
         function_f = function_f.to(device)
         if args.verbose:
                print('function_f created from global rank number {}, local rank {}' .format(args.global_rank, args.local_rank))
         
 
         # Set function_g
-        function_g = mlp.MLP(512*4*4, 1024, 128)
+        if args.arch == 'ResNet18' or args.arch == 'ResNet34':
+            function_g = mlp.MLP(512*4*4, 1024, 128)
+        elif args.arch == 'ResNet50' or args.arch == 'ResNet101' or args.arch == 'ResNet152':
+            function_g = mlp.MLP(2048*4*4, 1024, 128)
+        else:
+            raise Exception("error: Unrecognized {} architecture" .format(args.arch))
+
         function_g = function_g.to(device)
         if args.verbose:
                print('function_g created from global rank number {}, local rank {}' .format(args.global_rank, args.local_rank))
@@ -339,7 +401,12 @@ def main():
 
 
         if args.classifier == 'logistic_regression':
-                classifier = mlr.LogisticRegression(512*4*4*args.num_fixations**2, 1000)
+                if args.arch == 'ResNet18' or args.arch == 'ResNet34':
+                    classifier = mlr.LogisticRegression(512*4*4*args.num_fixations**2, 1000)
+                elif args.arch == 'ResNet50' or args.arch == 'ResNet101' or args.arch == 'ResNet152':
+                    classifier = mlr.LogisticRegression(2048*4*4*args.num_fixations**2, 1000)
+                else:
+                    raise Exception("error: Unrecognized {} architecture" .format(args.arch))
         else:
                 raise Exception("error: Unknown classifier {}" .format(args.classifier))
 
@@ -404,6 +471,7 @@ def main():
                              'optimizer': optimizer,
                              'warmup_epochs': args.warmup_epochs,
                              'train_epochs': args.epochs,
+                             'arch': args.arch,
                              'num_examples': NDP.compute_shard_size(pipe1, pipe1_reader_name),
                              'pipe1_reader_name': pipe1_reader_name,
                              'pipe3_reader_name': pipe3_reader_name,
@@ -541,11 +609,22 @@ def train_classifier(arguments):
                                         # make the fixation
                                         pipe2_output = NDP.pytorch_wrapper([arguments['pipe2']])
                                         fixation = arguments['model'](pipe2_output[0][:5])
-                                        fixation = fixation.view(arguments['batch_size'], 512*4*4)
+                                        if arguments['arch'] == 'ResNet18' or arguments['arch'] == 'ResNet34':
+                                            fixation = fixation.view(arguments['batch_size'], 512*4*4)
+                                        elif arguments['arch'] == 'ResNet50' or arguments['arch'] == 'ResNet101' or arguments['arch'] == 'ResNet152':
+                                            fixation = fixation.view(arguments['batch_size'], 2048*4*4)
+                                        else:
+                                            raise Exception("error: Unrecognized {} architecture" .format(args.arch))
+
                                         inputs.append(fixation)
 
                         inputs = torch.stack(inputs, dim=2)
-                        inputs = inputs.view(arguments['batch_size'], 512*4*4*args.num_fixations**2)
+                        if arguments['arch'] == 'ResNet18' or arguments['arch'] == 'ResNet34':
+                            inputs = inputs.view(arguments['batch_size'], 512*4*4*args.num_fixations**2)
+                        elif arguments['arch'] == 'ResNet50' or arguments['arch'] == 'ResNet101' or arguments['arch'] == 'ResNet152':
+                            inputs = inputs.view(arguments['batch_size'], 2048*4*4*args.num_fixations**2)
+                        else:
+                            raise Exception("error: Unrecognized {} architecture" .format(args.arch))
 
 
                 # bring the labels of this batch of images
@@ -588,7 +667,7 @@ def train_classifier(arguments):
                         batch_time.update((time() - end)/args.print_freq)
                         end = time()
 
-                        if args.local_rank == 0:
+                        if args.global_rank == 0:
                                 print('Epoch: [{0}][{1}/{2}]\t'
                                       'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                                       'Speed {3:.3f} ({4:.3f})\t'
@@ -661,11 +740,22 @@ def val_classifier(arguments):
                                         # make the fixation
                                         pipe2_output = NDP.pytorch_wrapper([arguments['pipe2']])
                                         fixation = arguments['model'](pipe2_output[0][:5])
-                                        fixation = fixation.view(arguments['batch_size'], 512*4*4)
+                                        if arguments['arch'] == 'ResNet18' or arguments['arch'] == 'ResNet34':
+                                            fixation = fixation.view(arguments['batch_size'], 512*4*4)
+                                        elif arguments['arch'] == 'ResNet50' or arguments['arch'] == 'ResNet101' or arguments['arch'] == 'ResNet152':
+                                            fixation = fixation.view(arguments['batch_size'], 2048*4*4)
+                                        else:
+                                            raise Exception("error: Unrecognized {} architecture" .format(args.arch))
+
                                         inputs.append(fixation)
 
                         inputs = torch.stack(inputs, dim=2)
-                        inputs = inputs.view(arguments['batch_size'], 512*4*4*args.num_fixations**2)
+                        if arguments['arch'] == 'ResNet18' or arguments['arch'] == 'ResNet34':
+                            inputs = inputs.view(arguments['batch_size'], 512*4*4*args.num_fixations**2)
+                        elif arguments['arch'] == 'ResNet50' or arguments['arch'] == 'ResNet101' or arguments['arch'] == 'ResNet152':
+                            inputs = inputs.view(arguments['batch_size'], 2048*4*4*args.num_fixations**2)
+                        else:
+                            raise Exception("error: Unrecognized {} architecture" .format(args.arch))
 
 
                 # bring the labels of this batch of images
@@ -695,7 +785,7 @@ def val_classifier(arguments):
                 batch_time.update((time() - end)/args.print_freq)
                 end = time()
 
-                if args.local_rank == 0 and i % args.print_freq == 0:
+                if args.global_rank == 0 and i % args.print_freq == 0:
                         print('Test: [{0}/{1}]\t'
                               'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                               'Speed {2:.3f} ({3:.3f})\t'
