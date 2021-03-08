@@ -33,7 +33,8 @@ class COCOReader(Pipeline):
                                     pad_last_batch=True,
                                     ratio=True,
                                     ltrb=True,
-                                    random_shuffle=False)
+                                    random_shuffle=False,
+				    read_ahead=False)
 
         #let user decide which pipeline works him bets for RN version he runs
         dali_device = 'cpu' if dali_cpu else 'gpu'
@@ -218,7 +219,7 @@ class ColorCommand(object):
 # This pipeline is for image plotting, presentation and exhibition purposes
 class FoveatedRetinalProcessor(Pipeline):
     def __init__(self, batch_size, num_threads, device_id,
-                 fixation_information, images,
+                 fixation_information, color_information, images,
                  dali_cpu=False):
 
         super(FoveatedRetinalProcessor, self).__init__(batch_size,
@@ -244,15 +245,28 @@ class FoveatedRetinalProcessor(Pipeline):
         self.crop_three = ops.Crop(device = dali_device, crop_h = 100, crop_w = 100)
         self.crop_four  = ops.Crop(device = dali_device, crop_h = 30, crop_w = 30)
         
+        self.flip   = ops.Flip(device="gpu")
+        self.color  = ops.ColorTwist(device='gpu')
+
+        self.flip_coin = ops.CoinFlip(probability=0.5)
+        
         self.img_batch = ops.ExternalSource(device=dali_device, source = images)
         self.fixation_source = ops.ExternalSource(source = fixation_information, num_outputs = 3)
+        self.color_source = ops.ExternalSource(source = color_information, num_outputs = 4)
 
     def define_graph(self):
+        flip_rng = self.flip_coin()
+
         images = self.img_batch()
 
         crop_pos_x, crop_pos_y, angle = self.fixation_source()
         
+        brightness, contrast, hue, saturation = self.color_source()
+        
         images   = self.rotate(self.resize_zero(images), angle=angle)
+
+        images = self.flip(images, horizontal=flip_rng)
+        images = self.color(images, brightness=brightness, contrast=contrast, hue=hue, saturation=saturation)
 
         cropped0 = self.crop_zero(images)
         cropped1 = self.crop_one(cropped0, crop_pos_x=crop_pos_x, crop_pos_y=crop_pos_y)
@@ -468,7 +482,8 @@ class ImagenetReader(Pipeline):
                                     shard_id = shard_id,
                                     num_shards = num_shards,
                                     pad_last_batch=True,
-                                    random_shuffle=random_shuffle)
+                                    random_shuffle=random_shuffle,
+				    read_ahead=False)
 
         #let user decide which pipeline works him bets for RN version he runs
         dali_device = 'cpu' if dali_cpu else 'gpu'
