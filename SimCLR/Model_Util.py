@@ -10,9 +10,9 @@ def learning_rate_schedule(arguments):
         """Build learning rate schedule."""
         optimizer_params = arguments['optimizer'].state[arguments['optimizer'].param_groups[0]["params"][-1]]
         if 'step' in optimizer_params:
-                global_step = optimizer_params['step'] // arguments['num_fixations']
+                global_step = optimizer_params['step'] #// arguments['num_fixations']
         else:
-                global_step = 1 // arguments['num_fixations']
+                global_step = 1 #// arguments['num_fixations']
 
         # warmup_steps = warmup_epochs * num_examples / batch_size
         warmup_steps = int(round(arguments['warmup_epochs'] * arguments['num_examples'] // arguments['batch_size']))
