@@ -69,7 +69,7 @@ try:
     # Pytorch will look for these:
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(size)
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(local_rank)
+    # os.environ['CUDA_VISIBLE_DEVICES'] = str(local_rank)
 
     # It will want the master address too, which we'll broadcast:
     if rank == 0:
@@ -109,7 +109,7 @@ def parse():
                             ' (default: ResNet18)')
         parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                             help='number of data loading workers (default: 4)')
-        parser.add_argument('--epochs', default=90, type=int, metavar='N',
+        parser.add_argument('--epochs', default=190, type=int, metavar='N',
                             help='number of total epochs to run')
         parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                             help='manual epoch number (useful on restarts)')
@@ -118,10 +118,10 @@ def parse():
         parser.add_argument('-f', '--num-fixations', default=10, type=int,
                             metavar='F', help='Number of fixations per image (default: 10)')
         parser.add_argument('--lr', '--learning-rate', default=0.01, type=float,
-                            metavar='LR', help='Initial learning rate.  By default, it will be scaled by <global batch size>/256: args.lr = args.lr*float(args.batch_size*args.world_size)/256. A warmup schedule will also be applied over the first --warmup_epochs epochs.')
+                            metavar='LR', help='Initial learning rate.  By default, it will be scaled by <global batch size>/256: args.lr = args.lr*float(args.batch_size*args.world_size)/256. A warmup schedule will also be applied over the first --warmup-epochs epochs.')
         parser.add_argument('--lrs', '--learning-rate-scaling', default='linear', type=str,
                             metavar='LRS', help='Function to scale the learning rate value (default: \'linear\').')
-        parser.add_argument('--warmup_epochs', default=10, type=int, metavar='W',
+        parser.add_argument('--warmup-epochs', default=10, type=int, metavar='W',
                             help='Number of warmup epochs (default: 10)')
         parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                             help='momentum')
@@ -191,7 +191,9 @@ def main():
                 args.global_rank = torch.distributed.get_rank()
 
                 args.local_rank = int(local_rank)
-                args.gpu = 0
+                args.gpu = args.local_rank
+
+                # args.gpu = 0
                 torch.cuda.set_device(args.gpu)
 
                 if args.verbose:
@@ -578,7 +580,7 @@ def train(arguments):
                         loss, logits, labels = Objective.contrastive_loss(hidden1=outputs1.data,
                                                                           hidden2=outputs2,
                                                                           temperature=arguments['temperature'],
-                                                                          local_rank=args.local_rank,
+                                                                          local_rank=args.global_rank,
                                                                           world_size=args.world_size,
                                                                           device=arguments['device'])
 
@@ -719,7 +721,7 @@ def validate(arguments):
                         loss, logits, labels = Objective.contrastive_loss(hidden1=outputs1.data,
                                                                           hidden2=outputs2,
                                                                           temperature=arguments['temperature'],
-                                                                          local_rank=args.local_rank,
+                                                                          local_rank=args.global_rank,
                                                                           world_size=args.world_size,
                                                                           device=arguments['device'])
 
