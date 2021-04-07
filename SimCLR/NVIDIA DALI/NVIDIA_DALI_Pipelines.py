@@ -483,7 +483,8 @@ class ImagenetReader(Pipeline):
                                     num_shards = num_shards,
                                     pad_last_batch=True,
                                     random_shuffle=random_shuffle,
-				    read_ahead=False)
+				    read_ahead=False,
+                                    dont_use_mmap=True)
 
         #let user decide which pipeline works him bets for RN version he runs
         dali_device = 'cpu' if dali_cpu else 'gpu'
