@@ -120,7 +120,7 @@ def parse():
                             metavar='N', help='mini-batch size per process (default: 256)')
         parser.add_argument('-f', '--num-fixations', default=2, type=int,
                             metavar='F', help='Number of fixations per image (default: 2)')
-        parser.add_argument('--lr', '--learning-rate', default=0.00001, type=float,
+        parser.add_argument('--lr', '--learning-rate', default=0.0000001, type=float,
                             metavar='LR',
                             help='Initial learning rate.  Will be scaled by <global batch size>/256:\n' +
                             'args.lr = args.lr*float(args.batch_size*args.world_size)/256.\n' +
@@ -401,14 +401,14 @@ def main():
 
 
         if args.classifier == 'logistic_regression':
-                if args.arch == 'ResNet18' or args.arch == 'ResNet34':
-                    classifier = mlr.LogisticRegression(512*4*4*args.num_fixations**2, 1000)
-                elif args.arch == 'ResNet50' or args.arch == 'ResNet101' or args.arch == 'ResNet152':
-                    classifier = mlr.LogisticRegression(2048*4*4*args.num_fixations**2, 1000)
-                else:
-                    raise Exception("error: Unrecognized {} architecture" .format(args.arch))
+            if args.arch == 'ResNet18' or args.arch == 'ResNet34':
+                classifier = mlr.LogisticRegression(512*4*4*args.num_fixations, 1000)
+            elif args.arch == 'ResNet50' or args.arch == 'ResNet101' or args.arch == 'ResNet152':
+                classifier = mlr.LogisticRegression(2048*4*4*args.num_fixations, 1000)
+            else:
+                raise Exception("error: Unrecognized {} architecture" .format(args.arch))
         else:
-                raise Exception("error: Unknown classifier {}" .format(args.classifier))
+            raise Exception("error: Unknown classifier {}" .format(args.classifier))
 
         classifier = classifier.to(device)
         if args.verbose:
@@ -593,38 +593,32 @@ def train_classifier(arguments):
 
                 inputs = []
                 with torch.no_grad():
-                        # set fixation angle for pipe2
-                        NDP.fixation_angle = torch.repeat_interleave(torch.Tensor([0.0]), args.batch_size).view(-1,1)
-                        # NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*10
-                        for j in range(args.num_fixations):
-                                # set fixation position y for pipe2
-                                pos_y = (0.5 + j) / args.num_fixations
-                                NDP.fixation_pos_y = torch.repeat_interleave(torch.Tensor([pos_y]), arguments['batch_size']).view(-1,1)
+                    # set fixation angle for pipe2
+                    NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*10
+                    for j in range(args.num_fixations):
+                        # set fixation position for pipe2
+                        NDP.fixation_pos_x = torch.rand((args.batch_size,1))
+                        NDP.fixation_pos_y = torch.rand((args.batch_size,1))
 
-                                for k in range(args.num_fixations):
-                                        # set fixation position x for pipe2
-                                        pos_x = (0.5 + k) / args.num_fixations
-                                        NDP.fixation_pos_x = torch.repeat_interleave(torch.Tensor([pos_x]), arguments['batch_size']).view(-1,1)
-
-                                        # make the fixation
-                                        pipe2_output = NDP.pytorch_wrapper([arguments['pipe2']])
-                                        fixation = arguments['model'](pipe2_output[0][:5])
-                                        if arguments['arch'] == 'ResNet18' or arguments['arch'] == 'ResNet34':
-                                            fixation = fixation.view(arguments['batch_size'], 512*4*4)
-                                        elif arguments['arch'] == 'ResNet50' or arguments['arch'] == 'ResNet101' or arguments['arch'] == 'ResNet152':
-                                            fixation = fixation.view(arguments['batch_size'], 2048*4*4)
-                                        else:
-                                            raise Exception("error: Unrecognized {} architecture" .format(args.arch))
-
-                                        inputs.append(fixation)
-
-                        inputs = torch.stack(inputs, dim=2)
+                        # make the fixation
+                        pipe2_output = NDP.pytorch_wrapper([arguments['pipe2']])
+                        fixation = arguments['model'](pipe2_output[0][:5])
                         if arguments['arch'] == 'ResNet18' or arguments['arch'] == 'ResNet34':
-                            inputs = inputs.view(arguments['batch_size'], 512*4*4*args.num_fixations**2)
+                            fixation = fixation.view(arguments['batch_size'], 512*4*4)
                         elif arguments['arch'] == 'ResNet50' or arguments['arch'] == 'ResNet101' or arguments['arch'] == 'ResNet152':
-                            inputs = inputs.view(arguments['batch_size'], 2048*4*4*args.num_fixations**2)
+                            fixation = fixation.view(arguments['batch_size'], 2048*4*4)
                         else:
                             raise Exception("error: Unrecognized {} architecture" .format(args.arch))
+
+                        inputs.append(fixation)
+
+                    inputs = torch.stack(inputs, dim=2)
+                    if arguments['arch'] == 'ResNet18' or arguments['arch'] == 'ResNet34':
+                        inputs = inputs.view(arguments['batch_size'], 512*4*4*args.num_fixations)
+                    elif arguments['arch'] == 'ResNet50' or arguments['arch'] == 'ResNet101' or arguments['arch'] == 'ResNet152':
+                        inputs = inputs.view(arguments['batch_size'], 2048*4*4*args.num_fixations)
+                    else:
+                        raise Exception("error: Unrecognized {} architecture" .format(args.arch))
 
 
                 # bring the labels of this batch of images
@@ -724,38 +718,32 @@ def val_classifier(arguments):
 
                 inputs = []
                 with torch.no_grad():
-                        # set fixation angle for pipe2
-                        NDP.fixation_angle = torch.repeat_interleave(torch.Tensor([0.0]), args.batch_size).view(-1,1)
-                        # NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*10
-                        for j in range(args.num_fixations):
-                                # set fixation position y for pipe2
-                                pos_y = (0.5 + j) / args.num_fixations
-                                NDP.fixation_pos_y = torch.repeat_interleave(torch.Tensor([pos_y]), arguments['batch_size']).view(-1,1)
+                    # set fixation angle for pipe2
+                    NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*10
+                    for j in range(args.num_fixations):
+                        # set fixation position for pipe2
+                        NDP.fixation_pos_x = torch.rand((args.batch_size,1))
+                        NDP.fixation_pos_y = torch.rand((args.batch_size,1))
 
-                                for k in range(args.num_fixations):
-                                        # set fixation position x for pipe2
-                                        pos_x = (0.5 + k) / args.num_fixations
-                                        NDP.fixation_pos_x = torch.repeat_interleave(torch.Tensor([pos_x]), arguments['batch_size']).view(-1,1)
-
-                                        # make the fixation
-                                        pipe2_output = NDP.pytorch_wrapper([arguments['pipe2']])
-                                        fixation = arguments['model'](pipe2_output[0][:5])
-                                        if arguments['arch'] == 'ResNet18' or arguments['arch'] == 'ResNet34':
-                                            fixation = fixation.view(arguments['batch_size'], 512*4*4)
-                                        elif arguments['arch'] == 'ResNet50' or arguments['arch'] == 'ResNet101' or arguments['arch'] == 'ResNet152':
-                                            fixation = fixation.view(arguments['batch_size'], 2048*4*4)
-                                        else:
-                                            raise Exception("error: Unrecognized {} architecture" .format(args.arch))
-
-                                        inputs.append(fixation)
-
-                        inputs = torch.stack(inputs, dim=2)
+                        # make the fixation
+                        pipe2_output = NDP.pytorch_wrapper([arguments['pipe2']])
+                        fixation = arguments['model'](pipe2_output[0][:5])
                         if arguments['arch'] == 'ResNet18' or arguments['arch'] == 'ResNet34':
-                            inputs = inputs.view(arguments['batch_size'], 512*4*4*args.num_fixations**2)
+                            fixation = fixation.view(arguments['batch_size'], 512*4*4)
                         elif arguments['arch'] == 'ResNet50' or arguments['arch'] == 'ResNet101' or arguments['arch'] == 'ResNet152':
-                            inputs = inputs.view(arguments['batch_size'], 2048*4*4*args.num_fixations**2)
+                            fixation = fixation.view(arguments['batch_size'], 2048*4*4)
                         else:
                             raise Exception("error: Unrecognized {} architecture" .format(args.arch))
+
+                        inputs.append(fixation)
+
+                    inputs = torch.stack(inputs, dim=2)
+                    if arguments['arch'] == 'ResNet18' or arguments['arch'] == 'ResNet34':
+                        inputs = inputs.view(arguments['batch_size'], 512*4*4*args.num_fixations)
+                    elif arguments['arch'] == 'ResNet50' or arguments['arch'] == 'ResNet101' or arguments['arch'] == 'ResNet152':
+                        inputs = inputs.view(arguments['batch_size'], 2048*4*4*args.num_fixations)
+                    else:
+                        raise Exception("error: Unrecognized {} architecture" .format(args.arch))
 
 
                 # bring the labels of this batch of images
