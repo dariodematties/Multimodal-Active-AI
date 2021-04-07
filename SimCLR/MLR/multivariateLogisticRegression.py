@@ -9,5 +9,5 @@ class LogisticRegression(nn.Module):
                 self.linear = nn.Linear(input_size, num_classes) 
 
         def forward(self, x):
-                out = self.linear(x)
-                return out
+            out = self.linear(x)
+            return out
