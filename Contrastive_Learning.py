@@ -163,6 +163,11 @@ def parse():
                 metavar='HUE', help='Hue value for color augmentation (range: [0.0 - 360.0] default: 90.0).')
         parser.add_argument('--saturation', default=0.5, type=float,
                 metavar='SATURATION', help='Saturation value for color augmentation (range: [0.0 - 1.0] default: 0.5).')
+
+        parser.add_argument('-pth', '--plot-training-history', action='store_true',
+                            help='Only plots the training history of a trained model: Loss and validation performance')
+
+
         args = parser.parse_args()
         return args
 
@@ -393,27 +398,51 @@ def main():
                 print('Optimizer used for this run is {}'.format(args.optimizer))
 
         # Optionally resume from a checkpoint
+        total_time = Utilities.AverageMeter()
+        loss_history = []
+        top1_acc_history = []
+        top5_acc_history = []
         if args.resume:
              # Use a local scope to avoid dangling references
              def resume():
                 if os.path.isfile(args.resume):
                     print("=> loading checkpoint '{}'" .format(args.resume))
                     checkpoint = torch.load(args.resume, map_location = lambda storage, loc: storage.cuda(args.gpu))
+                    loss_history = checkpoint['loss_history']
+                    top1_acc_history = checkpoint['top1_acc_history']
+                    top5_acc_history = checkpoint['top5_acc_history']
                     start_epoch = checkpoint['epoch']
                     best_prec1 = checkpoint['best_prec1']
                     model.load_state_dict(checkpoint['state_dict'])
                     optimizer.load_state_dict(checkpoint['optimizer'])
+                    total_time = checkpoint['total_time']
                     print("=> loaded checkpoint '{}' (epoch {})"
                                     .format(args.resume, checkpoint['epoch']))
                     print("Model best precision saved was {}" .format(best_prec1))
-                    return start_epoch, best_prec1, model, optimizer
+                    return start_epoch, best_prec1, model, optimizer, loss_history, top1_acc_history, top5_acc_history, total_time
                 else:
                     print("=> no checkpoint found at '{}'" .format(args.resume))
         
-             args.start_epoch, best_prec1, model, optimizer = resume()
+             args.start_epoch, best_prec1, model, optimizer, loss_history, top1_acc_history, top5_acc_history, total_time = resume()
 
 
-        total_time = Utilities.AverageMeter()
+
+        if args.plot_training_history and args.local_rank == 0:
+            Model_Util.plot_training_stats(loss_history, top1_acc_history, top5_acc_history)
+            hours = int(total_time.sum / 3600)
+            minutes = int((total_time.sum % 3600) / 60)
+            seconds = int((total_time.sum % 3600) % 60)
+            print('The total training time was {} hours {} minutes and {} seconds' .format(hours, minutes, seconds))
+            hours = int(total_time.avg / 3600)
+            minutes = int((total_time.avg % 3600) / 60)
+            seconds = int((total_time.avg % 3600) % 60)
+            print('while the average time during one epoch of training was {} hours {} minutes and {} seconds' .format(hours, minutes, seconds))
+            return
+
+
+
+
+
         for epoch in range(args.start_epoch, args.epochs):
                 arguments = {'pipe1': pipe1,
                              'pipe2': pipe2,
@@ -434,7 +463,10 @@ def main():
                              'learning_rate_scaling': args.lrs,
                              'temperature': args.temperature,
                              'is_testing': args.test,
-                             'device': device}
+                             'device': device,
+                             'loss_history': loss_history,
+                             'top1_acc_history': top1_acc_history,
+                             'top5_acc_history': top5_acc_history}
 
                 # train for one epoch
                 avg_train_time = train(arguments)
@@ -455,6 +487,10 @@ def main():
                                 'state_dict': model.state_dict(),
                                 'best_prec1': best_prec1,
                                 'optimizer': optimizer.state_dict(),
+                                'loss_history': loss_history,
+                                'top1_acc_history': top1_acc_history,
+                                'top5_acc_history': top5_acc_history,
+                                'total_time': total_time,
                         }, is_best)
 
                         print('##Contrastive Top-1 {0}\n'
@@ -630,6 +666,8 @@ def train(arguments):
 
                 i += 1
 
+        arguments['loss_history'].append(losses.avg)
+
         return batch_time.avg
 
 
@@ -758,6 +796,9 @@ def validate(arguments):
                               top5=top5_prec))
                 
                 i += 1
+
+        arguments['top1_acc_history'].append(top1_prec.avg)
+        arguments['top5_acc_history'].append(top5_prec.avg)
 
         return [top1_prec.avg, top5_prec.avg]
 

@@ -125,3 +125,24 @@ class Identity(nn.Module):
 
         def forward(self, x):
                 return x
+
+
+
+
+
+def plot_features_stats(losses, top1_acc, top5_acc):
+    fig, (loss, duration, amplitude) = plt.subplots(3, 1, sharex=True, figsize=(10,10))
+    fig.suptitle('Training process history', fontweight="bold", size=20)
+
+    loss.plot(losses)
+    loss.set(ylabel='Loss')
+
+    duration.plot(top1_acc, 'tab:green')
+    duration.set(ylabel='Top 1 contrastive accuracy')
+
+    amplitude.plot(top5_acc, 'tab:orange')
+    amplitude.set(ylabel='Top 5 contrastive accuracy', xlabel='Epochs')
+
+    plt.show()
+
+
