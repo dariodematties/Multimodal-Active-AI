@@ -29,7 +29,8 @@ from time import time
 sys.path.append('SimCLR/NVIDIA DALI')
 import NVIDIA_DALI_Pipelines as NDP
 sys.path.append('SimCLR/ResNet')
-import ResNet as rn
+import resnet as rn
+# import ResNet as rn
 sys.path.append('SimCLR/MLP')
 import multilayerPerceptron as mlp
 sys.path.append('SimCLR/MLR')
@@ -329,15 +330,20 @@ def main():
 
         # Set fuction_f
         if args.arch == 'ResNet18':
-            function_f = rn.ResNet.ResNet18()
+            function_f = rn.resnet18(norm_layer=nn.SyncBatchNorm)
+            # function_f = rn.ResNet.ResNet18()
         elif args.arch == 'ResNet34':
-            function_f = rn.ResNet.ResNet34()
+            function_f = rn.resnet34(norm_layer=nn.SyncBatchNorm)
+            # function_f = rn.ResNet.ResNet34()
         elif args.arch == 'ResNet50':
-            function_f = rn.ResNet.ResNet50()
+            function_f = rn.resnet50(norm_layer=nn.SyncBatchNorm)
+            # function_f = rn.ResNet.ResNet50()
         elif args.arch == 'ResNet101':
-            function_f = rn.ResNet.ResNet101()
+            function_f = rn.resnet101(norm_layer=nn.SyncBatchNorm)
+            # function_f = rn.ResNet.ResNet101()
         elif args.arch == 'ResNet152':
-            function_f = rn.ResNet.ResNet152()
+            function_f = rn.resnet152(norm_layer=nn.SyncBatchNorm)
+            # function_f = rn.ResNet.ResNet152()
         else:
             raise Exception("error: Unrecognized {} architecture" .format(args.arch))
 
@@ -348,9 +354,11 @@ def main():
 
         # Set function_g
         if args.arch == 'ResNet18' or args.arch == 'ResNet34':
-            function_g = mlp.MLP(512*4*4, 1024, 128)
+            function_g = mlp.MLP(512, 1024, 128)
+            # function_g = mlp.MLP(512*4*4, 1024, 128)
         elif args.arch == 'ResNet50' or args.arch == 'ResNet101' or args.arch == 'ResNet152':
-            function_g = mlp.MLP(2048*4*4, 1024, 128)
+            function_g = mlp.MLP(2048, 4096, 128)
+            # function_g = mlp.MLP(2048*4*4, 1024, 128)
         else:
             raise Exception("error: Unrecognized {} architecture" .format(args.arch))
 
@@ -402,9 +410,11 @@ def main():
 
         if args.classifier == 'logistic_regression':
             if args.arch == 'ResNet18' or args.arch == 'ResNet34':
-                classifier = mlr.LogisticRegression(512*4*4*args.num_fixations, 1000)
+                classifier = mlr.LogisticRegression(512*args.num_fixations, 1000)
+                # classifier = mlr.LogisticRegression(512*4*4*args.num_fixations, 1000)
             elif args.arch == 'ResNet50' or args.arch == 'ResNet101' or args.arch == 'ResNet152':
-                classifier = mlr.LogisticRegression(2048*4*4*args.num_fixations, 1000)
+                classifier = mlr.LogisticRegression(2048*args.num_fixations, 1000)
+                # classifier = mlr.LogisticRegression(2048*4*4*args.num_fixations, 1000)
             else:
                 raise Exception("error: Unrecognized {} architecture" .format(args.arch))
         else:
@@ -604,9 +614,11 @@ def train_classifier(arguments):
                         pipe2_output = NDP.pytorch_wrapper([arguments['pipe2']])
                         fixation = arguments['model'](pipe2_output[0][:5])
                         if arguments['arch'] == 'ResNet18' or arguments['arch'] == 'ResNet34':
-                            fixation = fixation.view(arguments['batch_size'], 512*4*4)
+                            fixation = fixation.view(arguments['batch_size'], 512)
+                            # fixation = fixation.view(arguments['batch_size'], 512*4*4)
                         elif arguments['arch'] == 'ResNet50' or arguments['arch'] == 'ResNet101' or arguments['arch'] == 'ResNet152':
-                            fixation = fixation.view(arguments['batch_size'], 2048*4*4)
+                            fixation = fixation.view(arguments['batch_size'], 2048)
+                            # fixation = fixation.view(arguments['batch_size'], 2048*4*4)
                         else:
                             raise Exception("error: Unrecognized {} architecture" .format(args.arch))
 
@@ -614,9 +626,11 @@ def train_classifier(arguments):
 
                     inputs = torch.stack(inputs, dim=2)
                     if arguments['arch'] == 'ResNet18' or arguments['arch'] == 'ResNet34':
-                        inputs = inputs.view(arguments['batch_size'], 512*4*4*args.num_fixations)
+                        inputs = inputs.view(arguments['batch_size'], 512*args.num_fixations)
+                        # inputs = inputs.view(arguments['batch_size'], 512*4*4*args.num_fixations)
                     elif arguments['arch'] == 'ResNet50' or arguments['arch'] == 'ResNet101' or arguments['arch'] == 'ResNet152':
-                        inputs = inputs.view(arguments['batch_size'], 2048*4*4*args.num_fixations)
+                        inputs = inputs.view(arguments['batch_size'], 2048*args.num_fixations)
+                        # inputs = inputs.view(arguments['batch_size'], 2048*4*4*args.num_fixations)
                     else:
                         raise Exception("error: Unrecognized {} architecture" .format(args.arch))
 
@@ -729,9 +743,11 @@ def val_classifier(arguments):
                         pipe2_output = NDP.pytorch_wrapper([arguments['pipe2']])
                         fixation = arguments['model'](pipe2_output[0][:5])
                         if arguments['arch'] == 'ResNet18' or arguments['arch'] == 'ResNet34':
-                            fixation = fixation.view(arguments['batch_size'], 512*4*4)
+                            fixation = fixation.view(arguments['batch_size'], 512)
+                            # fixation = fixation.view(arguments['batch_size'], 512*4*4)
                         elif arguments['arch'] == 'ResNet50' or arguments['arch'] == 'ResNet101' or arguments['arch'] == 'ResNet152':
-                            fixation = fixation.view(arguments['batch_size'], 2048*4*4)
+                            fixation = fixation.view(arguments['batch_size'], 2048)
+                            # fixation = fixation.view(arguments['batch_size'], 2048*4*4)
                         else:
                             raise Exception("error: Unrecognized {} architecture" .format(args.arch))
 
@@ -739,9 +755,11 @@ def val_classifier(arguments):
 
                     inputs = torch.stack(inputs, dim=2)
                     if arguments['arch'] == 'ResNet18' or arguments['arch'] == 'ResNet34':
-                        inputs = inputs.view(arguments['batch_size'], 512*4*4*args.num_fixations)
+                        inputs = inputs.view(arguments['batch_size'], 512*args.num_fixations)
+                        # inputs = inputs.view(arguments['batch_size'], 512*4*4*args.num_fixations)
                     elif arguments['arch'] == 'ResNet50' or arguments['arch'] == 'ResNet101' or arguments['arch'] == 'ResNet152':
-                        inputs = inputs.view(arguments['batch_size'], 2048*4*4*args.num_fixations)
+                        inputs = inputs.view(arguments['batch_size'], 2048*args.num_fixations)
+                        # inputs = inputs.view(arguments['batch_size'], 2048*4*4*args.num_fixations)
                     else:
                         raise Exception("error: Unrecognized {} architecture" .format(args.arch))
 

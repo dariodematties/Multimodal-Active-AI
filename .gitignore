@@ -7,6 +7,7 @@ __pycache__
 
 # Swap files from vim
 *.swp
+*.swn
 *.swo
 
 # Ignore jupyter-notebooks
