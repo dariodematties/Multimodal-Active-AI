@@ -9,6 +9,7 @@ __pycache__
 *.swp
 *.swn
 *.swo
+*.swm
 
 # Ignore jupyter-notebooks
 *.ipynb*
