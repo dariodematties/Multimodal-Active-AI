@@ -149,6 +149,10 @@ def parse():
                                  ' (default: mscoco)')
         parser.add_argument('--color-augmentation', default=0.5, type=float,
                             metavar='COLOR_AUG_PROBABILITY', help='The probability of applying color augmentation to the images (default: 0.5).')
+        parser.add_argument('--grid-mask-augmentation', default=0.0, type=float,
+                            metavar='GRID_MASK_AUG_PROBABILITY', help='The probability of applying grid mask augmentation to the images (default: 0.0).')
+        parser.add_argument('--gaussian-noise-augmentation', default=0.5, type=float,
+                            metavar='GAUSSIAN_NOISE_AUG_PROBABILITY', help='The probability of applying gaussian noise augmentation to the images (default: 0.5).')
         parser.add_argument('--dali_cpu', action='store_true',
                             help='Runs CPU based version of DALI pipeline.')
         parser.add_argument("--local_rank", default=0, type=int)
@@ -206,6 +210,19 @@ def main():
                 if args.verbose:
                         print('distributed is True, then world size is {}, global rank is {} and local rank number {} is mapped in device number {}'
                               .format(args.world_size, args.global_rank, args.local_rank, args.gpu))
+        else:
+                torch.distributed.init_process_group('gloo', init_method='env://', rank=0, world_size=1)
+                args.world_size = torch.distributed.get_world_size()
+                args.global_rank = torch.distributed.get_rank()
+
+                args.local_rank = int(local_rank)
+                args.gpu = args.local_rank
+                torch.cuda.set_device(args.gpu)
+
+                if args.verbose:
+                        print('distributed is True, then world size is {}, global rank is {} and local rank number {} is mapped in device number {}'
+                              .format(args.world_size, args.global_rank, args.local_rank, args.gpu))
+
 
 
         args.total_batch_size = args.world_size * args.batch_size
@@ -243,11 +260,13 @@ def main():
 
         # Set function_g
         if args.arch == 'ResNet18' or args.arch == 'ResNet34':
-            # function_g = mlp.MLP(512*4*4, 1024, 128)
-            function_g = mlp.MLP(512, 1024, 128)
+            # function_g = mlp.MLP(512*8*8, 1024, 128)
+            function_g = mlp.MLP(512*4*4, 1024, 128)
+            # function_g = mlp.MLP(512, 1024, 128)
         elif args.arch == 'ResNet50' or args.arch == 'ResNet101' or args.arch == 'ResNet152':
-            # function_g = mlp.MLP(2048*4*4, 1024, 128)
-            function_g = mlp.MLP(2048, 4096, 128)
+            # function_g = mlp.MLP(2048*8*8, 1024, 128)
+            function_g = mlp.MLP(2048*4*4, 1024, 128)
+            # function_g = mlp.MLP(2048, 4096, 128)
         else:
             raise Exception("error: Unrecognized {} architecture" .format(args.arch))
 
@@ -315,12 +334,16 @@ def main():
         # This is pipe2, which is used to augment the batches brought by pipe1 or pipe3 utilizing foveated saccades
         images = NDP.ImageCollector()
         fixation = NDP.FixationCommand(args.batch_size)
+        noise = NDP.NoiseCommand(args.batch_size)
         color = NDP.ColorCommand(args.batch_size)
+        grid_mask = NDP.GridMaskCommand(args.batch_size)
         pipe2 = NDP.UnlabeledFoveatedRetinalProcessor(batch_size=args.batch_size,
                                                       num_threads=args.workers,
                                                       device_id=args.gpu,
                                                       fixation_information=fixation,
+                                                      noise_information=noise,
                                                       color_information=color,
+                                                      grid_mask_information=grid_mask,
                                                       images=images,
                                                       dali_cpu=args.dali_cpu)
 
@@ -359,7 +382,9 @@ def main():
                 pipe3_reader_name = 'COCOReader'
 
         elif args.dataset == 'imagenet':
-                file_root = os.path.join(test_data_root, 'ImageNet', 'ILSVRC', 'Data', 'CLS-LOC', 'val')
+                aux='/lus/theta-fs0/software/datascience/'
+                file_root = os.path.join(aux, 'ImageNet', 'ILSVRC', 'Data', 'CLS-LOC', 'val')
+                # file_root = os.path.join(test_data_root, 'ImageNet', 'ILSVRC', 'Data', 'CLS-LOC', 'val')
 
                 pipe3 = NDP.ImagenetReader(batch_size=args.batch_size,
                                            num_threads=args.workers,
@@ -395,6 +420,8 @@ def main():
                         model = DDP(model)
                 else:
                         model = DDP(model, device_ids=[args.gpu], output_device=args.gpu)
+
+                model = model.module
 
                 if args.verbose:
                         print('Since we are in a distributed setting the model is replicated here in global rank number {}, local rank {}'
@@ -575,6 +602,22 @@ def train(arguments):
                 NDP.fixation_pos_y = torch.rand((args.batch_size,1))
                 NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*160
 
+                # set grid mask augmentation
+                if random.uniform(0, 1) < args.grid_mask_augmentation:
+                        NDP.grid_mask_ratio = torch.FloatTensor((args.batch_size)).uniform_(0.2,0.5)
+                        NDP.grid_mask_tile = torch.FloatTensor((args.batch_size)).uniform_(100,500).int()
+                else:
+                        NDP.grid_mask_ratio = torch.repeat_interleave(torch.Tensor([0.0]), args.batch_size)
+                        NDP.grid_mask_tile = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).int()
+
+                # set gaussian noise augmentation
+                if random.uniform(0, 1) < args.gaussian_noise_augmentation:
+                        NDP.noise_mean = torch.rand((args.batch_size))-0.5
+                        NDP.noise_std = torch.rand((args.batch_size))*100
+                else:
+                        NDP.noise_mean = torch.repeat_interleave(torch.Tensor([0.0]), args.batch_size)
+                        NDP.noise_std = torch.repeat_interleave(torch.Tensor([0.0]), args.batch_size)
+
                 # set color parameters for pipe2
                 if random.uniform(0, 1) < args.color_augmentation:
                         # brightnes goes from 0 to 2
@@ -601,6 +644,23 @@ def train(arguments):
                         NDP.fixation_pos_y = torch.rand((args.batch_size,1))
                         NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*160
                         
+                        # set grid mask augmentation
+                        if random.uniform(0, 1) < args.grid_mask_augmentation:
+                                NDP.grid_mask_ratio = torch.FloatTensor((args.batch_size)).uniform_(0.2,0.5)
+                                NDP.grid_mask_tile = torch.FloatTensor((args.batch_size)).uniform_(100,500).int()
+                        else:
+                                NDP.grid_mask_ratio = torch.repeat_interleave(torch.Tensor([0.0]), args.batch_size)
+                                NDP.grid_mask_tile = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).int()
+
+                        # set gaussian noise augmentation
+                        if random.uniform(0, 1) < args.gaussian_noise_augmentation:
+                                NDP.noise_mean = torch.rand((args.batch_size))-0.5
+                                NDP.noise_std = torch.rand((args.batch_size))*100
+                        else:
+                                NDP.noise_mean = torch.repeat_interleave(torch.Tensor([0.0]), args.batch_size)
+                                NDP.noise_std = torch.repeat_interleave(torch.Tensor([0.0]), args.batch_size)
+
+
                         # set color parameters for pipe2
                         if random.uniform(0, 1) < args.color_augmentation:
                                 # brightnes goes from 0 to 2
@@ -719,6 +779,22 @@ def validate(arguments):
                         NDP.fixation_pos_y = torch.rand((args.batch_size,1))
                         NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*160
 
+                        # set grid mask augmentation
+                        if random.uniform(0, 1) < args.grid_mask_augmentation:
+                                NDP.grid_mask_ratio = torch.FloatTensor((args.batch_size)).uniform_(0.2,0.5)
+                                NDP.grid_mask_tile = torch.FloatTensor((args.batch_size)).uniform_(100,500).int()
+                        else:
+                                NDP.grid_mask_ratio = torch.repeat_interleave(torch.Tensor([0.0]), args.batch_size)
+                                NDP.grid_mask_tile = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).int()
+
+                        # set gaussian noise augmentation
+                        if random.uniform(0, 1) < args.gaussian_noise_augmentation:
+                                NDP.noise_mean = torch.rand((args.batch_size))-0.5
+                                NDP.noise_std = torch.rand((args.batch_size))*100
+                        else:
+                                NDP.noise_mean = torch.repeat_interleave(torch.Tensor([0.0]), args.batch_size)
+                                NDP.noise_std = torch.repeat_interleave(torch.Tensor([0.0]), args.batch_size)
+
                         # set color parameters for pipe2
                         if random.uniform(0, 1) < args.color_augmentation:
                                 # brightnes goes from 0 to 2
@@ -744,6 +820,22 @@ def validate(arguments):
                         NDP.fixation_pos_y = torch.rand((args.batch_size,1))
                         NDP.fixation_angle = (torch.rand((args.batch_size,1))-0.5)*160
                         
+                        # set grid mask augmentation
+                        if random.uniform(0, 1) < args.grid_mask_augmentation:
+                                NDP.grid_mask_ratio = torch.FloatTensor((args.batch_size)).uniform_(0.2,0.5)
+                                NDP.grid_mask_tile = torch.FloatTensor((args.batch_size)).uniform_(100,500).int()
+                        else:
+                                NDP.grid_mask_ratio = torch.repeat_interleave(torch.Tensor([0.0]), args.batch_size)
+                                NDP.grid_mask_tile = torch.repeat_interleave(torch.Tensor([1.0]), args.batch_size).int()
+
+                        # set gaussian noise augmentation
+                        if random.uniform(0, 1) < args.gaussian_noise_augmentation:
+                                NDP.noise_mean = torch.rand((args.batch_size))-0.5
+                                NDP.noise_std = torch.rand((args.batch_size))*100
+                        else:
+                                NDP.noise_mean = torch.repeat_interleave(torch.Tensor([0.0]), args.batch_size)
+                                NDP.noise_std = torch.repeat_interleave(torch.Tensor([0.0]), args.batch_size)
+
                         # set the second round of color parameters for pipe2
                         if random.uniform(0, 1) < args.color_augmentation:
                                 # brightnes goes from 0 to 2
