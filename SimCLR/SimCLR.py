@@ -22,8 +22,11 @@ class SimCLR_Module(nn.Module):
 
     def forward(self, inputs):
         outputs = torch.stack(inputs).permute(1,0,4,2,3).reshape(self.batch_size,-1,self.img_size[0],self.img_size[1]).float()
+        # print('from the pipe {}' .format(outputs.shape))
         outputs = self.f(outputs)
+        # print('from resnet {}' .format(outputs.shape))
         outputs = self.g(outputs)
+        # print('from regressor {}' .format(outputs.shape))
 
         return outputs
 
