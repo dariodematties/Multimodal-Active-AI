@@ -12,6 +12,11 @@ global fixation_pos_x
 global fixation_pos_y
 global fixation_angle
 
+global noise_mean
+global noise_std
+
+global grid_mask_ratio
+global grid_mask_tile
 
 class COCOReader(Pipeline):
     def __init__(self, batch_size, num_threads, device_id,
@@ -152,6 +157,97 @@ class FixationCommand(object):
 
 
 
+
+
+class NoiseCommand(object):
+    def __init__(self, batch_size):
+        self.batch_size = batch_size
+
+    def _get_vectors(self):
+        global noise_mean
+        global noise_std
+        if 'noise_mean' in globals() and 'noise_std' in globals():
+            self.vector1 = noise_mean
+            self.vector2 = noise_std
+        else:
+            print('Initialating noises\n')
+            noise_mean = torch.rand((self.batch_size,1))
+            noise_std = torch.rand((self.batch_size,1))
+
+            self.vector1 = noise_mean
+            self.vector2 = noise_std
+
+
+    def __iter__(self):
+        self._get_vectors()
+        assert len(self.vector1) == self.batch_size
+        assert len(self.vector2) == self.batch_size
+        self.i = 0
+        self.n = len(self.vector1)
+        return self
+
+    def __next__(self):
+        batch1 = []
+        batch2 = []
+        self._get_vectors()
+        for _ in range(self.batch_size):
+            element1 = self.vector1[self.i]
+            batch1.append(element1)
+            element2 = self.vector2[self.i]
+            batch2.append(element2)
+            self.i = (self.i + 1) % self.n
+        return batch1, batch2
+
+
+
+
+
+
+
+
+class GridMaskCommand(object):
+    def __init__(self, batch_size):
+        self.batch_size = batch_size
+
+    def _get_vectors(self):
+        global grid_mask_ratio
+        global grid_mask_tile
+        if 'grid_mask_ratio' in globals() and 'grid_mask_tile' in globals():
+            self.vector1 = grid_mask_ratio
+            self.vector2 = grid_mask_tile
+        else:
+            print('Initialating noises\n')
+            grid_mask_ratio = torch.rand((self.batch_size,1))
+            grid_mask_tile = torch.rand((self.batch_size,1))
+
+            self.vector1 = grid_mask_ratio
+            self.vector2 = grid_mask_tile
+
+
+    def __iter__(self):
+        self._get_vectors()
+        assert len(self.vector1) == self.batch_size
+        assert len(self.vector2) == self.batch_size
+        self.i = 0
+        self.n = len(self.vector1)
+        return self
+
+    def __next__(self):
+        batch1 = []
+        batch2 = []
+        self._get_vectors()
+        for _ in range(self.batch_size):
+            element1 = self.vector1[self.i]
+            batch1.append(element1)
+            element2 = self.vector2[self.i]
+            batch2.append(element2)
+            self.i = (self.i + 1) % self.n
+        return batch1, batch2
+
+
+
+
+
 class ColorCommand(object):
     def __init__(self, batch_size):
         self.batch_size = batch_size
@@ -219,7 +315,7 @@ class ColorCommand(object):
 # This pipeline is for image plotting, presentation and exhibition purposes
 class FoveatedRetinalProcessor(Pipeline):
     def __init__(self, batch_size, num_threads, device_id,
-                 fixation_information, color_information, images,
+                 fixation_information, noise_information, color_information, images,
                  dali_cpu=False):
 
         super(FoveatedRetinalProcessor, self).__init__(batch_size,
@@ -247,11 +343,14 @@ class FoveatedRetinalProcessor(Pipeline):
         
         self.flip   = ops.Flip(device="gpu")
         self.color  = ops.ColorTwist(device='gpu')
+        self.gaussian_noise = ops.NormalDistribution(device="gpu")
+        # self.grid_mask = ops.GridMask(device='gpu')
 
         self.flip_coin = ops.CoinFlip(probability=0.5)
         
         self.img_batch = ops.ExternalSource(device=dali_device, source = images)
         self.fixation_source = ops.ExternalSource(source = fixation_information, num_outputs = 3)
+        self.noise_source = ops.ExternalSource(source = noise_information, num_outputs = 2)
         self.color_source = ops.ExternalSource(source = color_information, num_outputs = 4)
 
     def define_graph(self):
@@ -259,11 +358,17 @@ class FoveatedRetinalProcessor(Pipeline):
 
         images = self.img_batch()
 
+        gaussian_mean, gaussian_std = self.noise_source()
+
         crop_pos_x, crop_pos_y, angle = self.fixation_source()
         
         brightness, contrast, hue, saturation = self.color_source()
         
+        images += self.gaussian_noise(images, mean=gaussian_mean, stddev=gaussian_std)
+
         images   = self.rotate(self.resize_zero(images), angle=angle)
+
+        # images   = self.grid_mask(images)
 
         images = self.flip(images, horizontal=flip_rng)
         images = self.color(images, brightness=brightness, contrast=contrast, hue=hue, saturation=saturation)
@@ -294,8 +399,8 @@ class FoveatedRetinalProcessor(Pipeline):
 
 class UnlabeledFoveatedRetinalProcessor(Pipeline):
     def __init__(self, batch_size, num_threads, device_id,
-                 fixation_information, color_information, images,
-                 dali_cpu=False):
+                 fixation_information, noise_information, color_information, grid_mask_information, 
+                 images, dali_cpu=False):
 
         super(UnlabeledFoveatedRetinalProcessor, self).__init__(batch_size,
                                                        num_threads,
@@ -307,6 +412,10 @@ class UnlabeledFoveatedRetinalProcessor(Pipeline):
 
         #let user decide which pipeline works him bets for RN version he runs
         dali_device = 'cpu' if dali_cpu else 'gpu'
+
+        self.random_resized_crop = ops.RandomResizedCrop(device = "gpu", size = [640,640], random_area = [0.1,1.0])
+
+        self.gaussian_noise = ops.NormalDistribution(device="gpu")
 
         self.resize_zero = ops.Resize(device = dali_device, resize_x = 640, resize_y = 640)
         
@@ -322,11 +431,14 @@ class UnlabeledFoveatedRetinalProcessor(Pipeline):
 
         self.flip   = ops.Flip(device="gpu")
         self.color  = ops.ColorTwist(device='gpu')
+        self.grid_mask = ops.GridMask(device='gpu')
 
         self.flip_coin = ops.CoinFlip(probability=0.5)
         
         self.img_batch = ops.ExternalSource(device=dali_device, source = images)
         self.fixation_source = ops.ExternalSource(source = fixation_information, num_outputs = 3)
+        self.grid_mask_source = ops.ExternalSource(source = grid_mask_information, num_outputs = 2)
+        self.noise_source = ops.ExternalSource(source = noise_information, num_outputs = 2)
         self.color_source = ops.ExternalSource(source = color_information, num_outputs = 4)
 
     def define_graph(self):
@@ -334,11 +446,20 @@ class UnlabeledFoveatedRetinalProcessor(Pipeline):
 
         images = self.img_batch()
 
+        gaussian_mean, gaussian_std = self.noise_source()
+
         crop_pos_x, crop_pos_y, angle = self.fixation_source()
+
+        grid_mask_ratio, grid_mask_tile = self.grid_mask_source()
 
         brightness, contrast, hue, saturation = self.color_source()
         
-        images   = self.rotate(self.resize_zero(images), angle=angle)
+        images  = self.rotate(self.random_resized_crop(images), angle=angle)
+        # images  = self.rotate(self.resize_zero(images), angle=angle)
+
+        images   = self.grid_mask(images, angle=angle, shift_x=crop_pos_x, shift_y=crop_pos_y, ratio=grid_mask_ratio, tile=grid_mask_tile)
+
+        images += self.gaussian_noise(images, mean=gaussian_mean, stddev=gaussian_std)
 
         images = self.flip(images, horizontal=flip_rng)
         images = self.color(images, brightness=brightness, contrast=contrast, hue=hue, saturation=saturation)
@@ -349,13 +470,14 @@ class UnlabeledFoveatedRetinalProcessor(Pipeline):
         cropped3 = self.crop_three(cropped0, crop_pos_x=crop_pos_x, crop_pos_y=crop_pos_y)
         cropped4 = self.crop_four(cropped0, crop_pos_x=crop_pos_x, crop_pos_y=crop_pos_y)
         
-        sized0   = self.resize_one(cropped0)
+        # sized0   = self.resize_one(cropped0)
         sized1   = self.resize_one(cropped1)
         sized2   = self.resize_one(cropped2)
         sized3   = self.resize_one(cropped3)
         sized4   = self.resize_one(cropped4)
         
-        return (sized0, sized1, sized2, sized3, sized4)
+        return (sized1, sized2, sized3, sized4)
+        # return (sized0, sized1, sized2, sized3, sized4)
 
 
 
@@ -412,13 +534,14 @@ class LabeledFoveatedRetinalProcessor(Pipeline):
         cropped3 = self.crop_three(cropped0, crop_pos_x=crop_pos_x, crop_pos_y=crop_pos_y)
         cropped4 = self.crop_four(cropped0, crop_pos_x=crop_pos_x, crop_pos_y=crop_pos_y)
         
-        sized0   = self.resize_one(cropped0)
+        # sized0   = self.resize_one(cropped0)
         sized1   = self.resize_one(cropped1)
         sized2   = self.resize_one(cropped2)
         sized3   = self.resize_one(cropped3)
         sized4   = self.resize_one(cropped4)
         
-        return (sized0, sized1, sized2, sized3, sized4, labels)
+        return (sized1, sized2, sized3, sized4, labels)
+        # return (sized0, sized1, sized2, sized3, sized4, labels)
 
 
 
