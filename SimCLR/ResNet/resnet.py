@@ -144,7 +144,8 @@ class ResNet(nn.Module):
         zero_init_residual: bool = False,
         groups: int = 1,
         width_per_group: int = 64,
-        crop_measures: int = 5,
+        crop_measures: int = 4,
+        # crop_measures: int = 5,
         replace_stride_with_dilation: Optional[List[bool]] = None,
         norm_layer: Optional[Callable[..., nn.Module]] = None
     ) -> None:
@@ -165,7 +166,7 @@ class ResNet(nn.Module):
         self.groups = groups
         self.base_width = width_per_group
         self.crop_measures = crop_measures
-        self.conv1 = nn.Conv2d(3*self.crop_measures, self.inplanes, kernel_size=7, stride=2, padding=3,
+        self.conv1 = nn.Conv2d(3*self.crop_measures, self.inplanes, kernel_size=7, stride=1, padding=3,
                                bias=False)
         self.bn1 = norm_layer(self.inplanes)
         self.relu = nn.ReLU(inplace=True)
@@ -177,6 +178,7 @@ class ResNet(nn.Module):
                                        dilate=replace_stride_with_dilation[1])
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2,
                                        dilate=replace_stride_with_dilation[2])
+        # self.avgpool = nn.AdaptiveAvgPool2d((4, 4))
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
 
         for m in self.modules():
@@ -226,14 +228,14 @@ class ResNet(nn.Module):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
-        x = self.maxpool(x)
+        # x = self.maxpool(x)
 
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
 
-        x = self.avgpool(x)
+        # x = self.avgpool(x)
 
         return x
 
