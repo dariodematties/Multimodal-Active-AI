@@ -193,6 +193,19 @@ def main():
                 if args.verbose:
                         print('distributed is True, then world size is {}, global rank is {} and local rank number {} is mapped in device number {}'
                               .format(args.world_size, args.global_rank, args.local_rank, args.gpu))
+        else:
+                torch.distributed.init_process_group('gloo', init_method='env://', rank=0, world_size=1)
+                args.world_size = torch.distributed.get_world_size()
+                args.global_rank = torch.distributed.get_rank()
+
+                args.local_rank = int(local_rank)
+                args.gpu = args.local_rank
+                torch.cuda.set_device(args.gpu)
+
+                if args.verbose:
+                    print('distributed is True, then world size is {}, global rank is {} and local rank number {} is mapped in device number {}'
+                          .format(args.world_size, args.global_rank, args.local_rank, args.gpu))
+
 
         args.total_batch_size = args.world_size * args.batch_size
 
@@ -384,6 +397,7 @@ def main():
                 else:
                         model = DDP(model, device_ids=[args.gpu], output_device=args.gpu)
 
+                model = model.module
                 if args.verbose:
                         print('Since we are in a distributed setting the model is replicated here in global rank number {}, local rank {}'
                                         .format(args.global_rank, args.local_rank))
@@ -398,7 +412,7 @@ def main():
                     model.load_state_dict(checkpoint['state_dict'])
                     print("=> loaded pretrained model '{}'"
                                     .format(args.model))
-                    model.module.g = Model_Util.Identity().to(device)
+                    model.g = Model_Util.Identity().to(device)
                     return model
                 else:
                     print("=> no pretrained model found at '{}'" .format(args.model))
@@ -440,6 +454,7 @@ def main():
                                         .format(args.global_rank, args.local_rank))
 
 
+                classifier = classifier.module
 
 
 
